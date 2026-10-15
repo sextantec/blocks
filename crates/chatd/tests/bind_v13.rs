@@ -597,10 +597,16 @@ fn x1_cli_sem_mux_detectavel_sai_2() {
     let a = amb(json!({"delivery": "auto"}));
     let sock = s(&a.sock()).to_string();
     let tok = s(&a.tokfile_codex).to_string();
-    let r = Command::new(BIN)
-        .args(["bind", "--as", CODEX, "--pane", "%1"])
-        .env_remove("TMUX_PANE")
-        .env_remove("TMUX")
+    // Isolamento: tira do filho todas as variaveis de multiplexador (TMUX*, HERDR_*), para que a suite
+    // rodando dentro de um painel do herdr ou do tmux nao faca o bind achar um mux comprovado (saida 3).
+    let mut cmd = Command::new(BIN);
+    cmd.args(["bind", "--as", CODEX, "--pane", "%1"]);
+    for (k, _) in std::env::vars() {
+        if k.starts_with("TMUX") || k.starts_with("HERDR_") {
+            cmd.env_remove(&k);
+        }
+    }
+    let r = cmd
         .env_remove("CHATD_SOCKET")
         .env_remove("CHATD_TOKEN_FILE")
         .env("CHATD_SOCKET", &sock)

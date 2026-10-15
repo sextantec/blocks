@@ -549,7 +549,8 @@ fn i1_default_profile_sem_variaveis_sai_2_sem_conectar_e_sem_abrir_token() {
             "profiles": {"claude": {"as": A, "token_file": tok.display().to_string()}}
         }),
     );
-    let r = erro_sem_conectar(&a, &["status"], &[]);
+    // Esclarecimento 12: status nao exige identidade; o fail-closed vale para inbox (e send, ack, show, watch, bind).
+    let r = erro_sem_conectar(&a, &["inbox", "--json"], &[]);
     assert!(
         r.stderr.contains("identidade nao definida"),
         "mensagem de identidade ausente: {r:?}"
@@ -806,7 +807,34 @@ fn i7_sem_variaveis_com_default_profile_whoami_sai_0_com_as_nulo_e_status_sai_2(
         r.stderr.contains(AVISO_DEFAULT),
         "aviso de default_profile em stderr: {r:?}"
     );
-    let _ = erro_sem_conectar(&a, &["status"], &[]);
+    // status nao exige identidade (Esclarecimento 12); o fail-closed de um comando de caixa e o inbox.
+    let _ = erro_sem_conectar(&a, &["inbox", "--json"], &[]);
+}
+
+// ---------- I9: status sem identidade conecta sem autenticar (Esclarecimento 12); default_profile nao abre token ----------
+
+#[test]
+fn i9_status_sem_identidade_contra_auth_off_sai_0_e_nao_abre_o_token() {
+    let a = Amb::novo();
+    fs::create_dir_all(a.state()).unwrap();
+    let cfg = escreve(&a.p().join("srv-off-i9.json"), &cfg_sem_auth().to_string(), 0o600);
+    let _srv = Srv::sobe(&a, &a.state(), &cfg, "auth-off-i9");
+    // default_profile com token em FIFO: se o cliente abrir o token, bloqueia e o roda estoura (code None).
+    let tok = a.p().join("token-fifo-i9.tok");
+    fifo(&tok);
+    grava_cfg(
+        &a,
+        &json!({
+            "socket": a.socket().display().to_string(),
+            "state_dir": a.state().display().to_string(),
+            "default_profile": "jabbur",
+            "profiles": {"jabbur": {"as": C, "token_file": tok.display().to_string()}}
+        }),
+    );
+    let sock = a.socket().display().to_string();
+    let r = roda(&a, &["status"], &[("CHATD_SOCKET", sock.as_str())]);
+    assert_eq!(r.code, Some(0), "status sem identidade contra auth off: {r:?}");
+    assert!(r.stderr.contains(AVISO_DEFAULT), "o aviso de default_profile continua: {r:?}");
 }
 
 // ---------- I8: identidade explicita (--from) sem token funciona com daemon auth off; token nao e aberto ----------
