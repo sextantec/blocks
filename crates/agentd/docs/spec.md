@@ -129,3 +129,13 @@ Fonte app-server do Codex; fontes de hook do Claude e interrupcao pela transcric
 ## Anexo (nao normativo): contratos futuros
 - **Varias fontes:** a prioridade so resolve conflito entre postos diferentes (`declared` fresco vence `observed` fresco; `declared` velho nao vence nada); duas fontes do mesmo posto frescas e em desacordo => `unknown` com `error`.
 - **Relatos `declared`:** `sequence` crescente por agente e fonte; `ttl_s` de 5 a 3600 contado da recepcao (monotonico); relato expira para `unknown`; sequencia que nao cresce e ignorada; uma fonte `declared` por agente; canal e identidade da fonte a definir (mesmo uid nao e isolamento entre agentes). Modelo: `agent.report` do Luvus (`src/app/dispatch/agents.rs:407-520`). **Nao exercitavel na v1** (sem metodo de escrita).
+
+## 13. Esclarecimentos dos testes independentes (2026-10-15 noite)
+1. **Pedido:** o campo `"jsonrpc":"2.0"` e **aceito e opcional** no pedido; a resposta o traz. Primeiro `seq` de uma `epoch` e **1** (`head_seq` 0 = nenhum evento).
+2. **`SIGTERM`** encerra o `serve` de forma limpa com saida **0**. Linha acima de 1 MiB: erro `invalid_request` e a conexao e fechada; lote (array): `invalid_request`; `data.path` e a trilha com pontos (`params.campo`).
+3. **`agentd health`** com a fonte falha sai **1**; com o daemon fora, **4**. **`observed_at`** e `null` antes da primeira leitura valida (e `freshness_ms` tambem).
+4. **Estado inicial** de um agente nunca lido: `state: unknown`, `evidence: none`, `source: null`, `marks: [error]` (a primeira leitura valida preenche).
+5. **Anel retido:** os `ring` ultimos eventos; `oldest = head_seq - ring + 1` quando o anel esta cheio.
+6. **Partida:** o daemon imprime em stderr uma linha `agentd: pronto` quando o socket aceita conexao.
+7. **(rev4, decisao do Jabbur, 21):** `blocked_reason` (classe `permission|user_input|unknown`) e `since` entram em `Agente` e nos eventos; ainda **nao** implementados na v1 (nucleo).
+
