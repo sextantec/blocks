@@ -291,6 +291,32 @@ impl Store {
             "denied" => {
                 str_field(obj, "method")?;
             }
+            "bound" => {
+                if !protocol::valid_name(str_field(obj, "name")?)
+                    || !matches!(str_field(obj, "mux")?, "herdr" | "tmux")
+                    || !protocol::valid_pane_id(str_field(obj, "pane")?)
+                {
+                    return Err("evento bound invalido".to_string());
+                }
+                obj.get("peer_pid")
+                    .and_then(Value::as_i64)
+                    .filter(|pid| *pid > 0)
+                    .ok_or("campo 'peer_pid' ausente ou invalido")?;
+            }
+            "unbound" => {
+                if !protocol::valid_name(str_field(obj, "name")?)
+                    || !matches!(str_field(obj, "mux")?, "herdr" | "tmux")
+                    || !protocol::valid_pane_id(str_field(obj, "pane")?)
+                {
+                    return Err("evento unbound invalido".to_string());
+                }
+                if !matches!(
+                    str_field(obj, "reason")?,
+                    "expired" | "process_gone" | "replaced"
+                ) {
+                    return Err("reason de unbound invalido".to_string());
+                }
+            }
             "bell_sent" => {
                 let r = str_field(obj, "recipient")?.to_string();
                 self.last_bell_seq.insert(r, seq);
@@ -328,6 +354,20 @@ impl Store {
             return Err(internal("falha ao gravar o log".to_string()));
         }
         Ok(())
+    }
+
+    fn append_event(
+        &mut self,
+        kind: &str,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> Result<(), ApiError> {
+        let mut ev = Map::new();
+        ev.insert("type".into(), json!(kind));
+        ev.insert("ts".into(), json!(now_ts()));
+        for (key, value) in fields {
+            ev.insert(key.into(), value);
+        }
+        self.append(ev)
     }
 
     pub fn head(&self) -> u64 {
@@ -520,15 +560,11 @@ impl Store {
         peer_uid: u32,
         peer_pid: i32,
     ) -> Result<(), ApiError> {
-        let mut ev = Map::new();
-        ev.insert("type".into(), json!("auth_failed"));
-        ev.insert("ts".into(), json!(now_ts()));
+        let mut fields = vec![("peer_uid", json!(peer_uid)), ("peer_pid", json!(peer_pid))];
         if let Some(n) = name {
-            ev.insert("name".into(), json!(n));
+            fields.push(("name", json!(n)));
         }
-        ev.insert("peer_uid".into(), json!(peer_uid));
-        ev.insert("peer_pid".into(), json!(peer_pid));
-        self.append(ev)
+        self.append_event("auth_failed", fields)
     }
 
     /// Rastro de `forbidden` (spec F.2): metodo, peer e o nome pretendido (so se for nome valido).
@@ -540,16 +576,15 @@ impl Store {
         peer_pid: i32,
         claimed: Option<&str>,
     ) -> Result<(), ApiError> {
-        let mut ev = Map::new();
-        ev.insert("type".into(), json!("denied"));
-        ev.insert("ts".into(), json!(now_ts()));
-        ev.insert("method".into(), json!(method));
-        ev.insert("peer_uid".into(), json!(peer_uid));
-        ev.insert("peer_pid".into(), json!(peer_pid));
+        let mut fields = vec![
+            ("method", json!(method)),
+            ("peer_uid", json!(peer_uid)),
+            ("peer_pid", json!(peer_pid)),
+        ];
         if let Some(c) = claimed {
-            ev.insert("claimed".into(), json!(c));
+            fields.push(("claimed", json!(c)));
         }
-        self.append(ev)
+        self.append_event("denied", fields)
     }
 
     pub fn pending_count(&self, name: &str) -> usize {
@@ -577,11 +612,7 @@ impl Store {
 
     /// Registra a campainha tocada (evento `bell_sent` e estado `outstanding`).
     pub fn bell_sent(&mut self, name: &str, now: Instant) -> Result<(), ApiError> {
-        let mut ev = Map::new();
-        ev.insert("type".into(), json!("bell_sent"));
-        ev.insert("ts".into(), json!(now_ts()));
-        ev.insert("recipient".into(), json!(name));
-        self.append(ev)?;
+        self.append_event("bell_sent", [("recipient", json!(name))])?;
         self.outstanding.insert(name.to_string(), now);
         Ok(())
     }
@@ -594,12 +625,46 @@ impl Store {
             return Ok(());
         }
         self.bell_fail_at.insert(name.to_string(), now);
-        let mut ev = Map::new();
-        ev.insert("type".into(), json!("bell_failed"));
-        ev.insert("ts".into(), json!(now_ts()));
-        ev.insert("recipient".into(), json!(name));
-        ev.insert("reason".into(), json!(reason));
-        self.append(ev)
+        self.append_event(
+            "bell_failed",
+            [("recipient", json!(name)), ("reason", json!(reason))],
+        )
+    }
+
+    pub fn bound(
+        &mut self,
+        name: &str,
+        mux: &str,
+        pane: &str,
+        peer_pid: i32,
+    ) -> Result<(), ApiError> {
+        self.append_event(
+            "bound",
+            [
+                ("name", json!(name)),
+                ("mux", json!(mux)),
+                ("pane", json!(pane)),
+                ("peer_pid", json!(peer_pid)),
+            ],
+        )
+    }
+
+    pub fn unbound(
+        &mut self,
+        name: &str,
+        mux: &str,
+        pane: &str,
+        reason: &str,
+    ) -> Result<(), ApiError> {
+        self.append_event(
+            "unbound",
+            [
+                ("name", json!(name)),
+                ("mux", json!(mux)),
+                ("pane", json!(pane)),
+                ("reason", json!(reason)),
+            ],
+        )
     }
 
     /// `status` (spec v1 5.5). Com `who`, so a entrada da identidade (v1.1 B).

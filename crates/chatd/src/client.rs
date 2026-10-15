@@ -18,6 +18,7 @@ const SOCKET_OPTS: [&str; 3] = ["socket", "state-dir", "token-file"];
 const RPC_DEADLINE: Duration = Duration::from_secs(30);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(5);
+const BIND_KEEPALIVE: Duration = Duration::from_secs(25);
 
 /// Erro de uma chamada: falha de transporte ou erro devolvido pelo servidor.
 pub enum Rpc {
@@ -31,8 +32,16 @@ pub enum Rpc {
 }
 
 fn rpc_fail(e: Rpc) -> Failure {
+    rpc_failure(e, false)
+}
+
+fn rpc_failure(e: Rpc, for_bind: bool) -> Failure {
     match e {
+        Rpc::Io(m) if for_bind => Failure::Unavailable(m),
         Rpc::Io(m) => Failure::Run(m),
+        Rpc::Server { code, message } if for_bind && code == "forbidden" => {
+            Failure::BindForbidden(format!("{code}: {message}"))
+        }
         Rpc::Server { code, message } => Failure::Run(format!("{code}: {message}")),
         Rpc::NoToken => Failure::Bad(NO_TOKEN_MSG.to_string()),
     }
@@ -471,6 +480,85 @@ pub fn status(args: &[String]) -> Result<(), Failure> {
     Ok(())
 }
 
+fn bind_rpc_fail(e: Rpc) -> Failure {
+    rpc_failure(e, true)
+}
+
+pub fn bind(args: &[String]) -> Result<(), Failure> {
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.extend(["as", "mux", "pane"]);
+    let o = parse_opts(args, &vals, &["keepalive"])?;
+    let name = identity(&o, "as")?;
+    let name = need(&name, "bind")?.to_string();
+    if let Some(env_name) = std::env::var("CHATD_AS").ok().filter(|s| !s.is_empty())
+        && env_name != name
+    {
+        return Err(Failure::BindForbidden(format!(
+            "forbidden: --as {name} difere de CHATD_AS {env_name}"
+        )));
+    }
+    let tmux_pane = std::env::var("TMUX_PANE").ok().filter(|v| !v.is_empty());
+    let herdr_pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let mux = match o.get("mux") {
+        Some("tmux") => "tmux",
+        Some("herdr") => "herdr",
+        Some(_) => return Err(usage("--mux deve ser herdr ou tmux")),
+        None => match (tmux_pane.is_some(), herdr_pane.is_some()) {
+            (true, false) => "tmux",
+            (false, true) => "herdr",
+            (true, true) => return Err(usage("multiplexador ambiguo; informe --mux")),
+            (false, false) => {
+                return Err(usage("nao detectei multiplexador; informe --mux e --pane"));
+            }
+        },
+    };
+    let pane = o
+        .get("pane")
+        .map(str::to_string)
+        .or_else(|| if mux == "tmux" { tmux_pane } else { herdr_pane })
+        .ok_or_else(|| usage(format!("--pane obrigatorio para mux {mux}")))?;
+    if !crate::protocol::valid_pane_id(&pane) {
+        return Err(usage("pane invalido"));
+    }
+    let keepalive = o.flag("keepalive");
+    let stop = Arc::new(AtomicBool::new(false));
+    if keepalive {
+        for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signal_hook::flag::register(sig, Arc::clone(&stop))
+                .map_err(|e| Failure::Run(format!("nao registrei sinal: {e}")))?;
+        }
+    }
+    let mut s = match open(&o, Some(&name)) {
+        Ok(s) => s,
+        Err(Failure::Run(message)) if message.starts_with("nao conectou em ") => {
+            return Err(Failure::Unavailable(message));
+        }
+        Err(error) => return Err(error),
+    };
+    let params = json!({"v": 1, "mux": mux, "pane": pane});
+    let result = s
+        .call("agent.bind", params.clone())
+        .map_err(bind_rpc_fail)?;
+    println!(
+        "{} {} {} ttl_s={}",
+        txt(&result["name"]),
+        txt(&result["mux"]),
+        txt(&result["pane"]),
+        txt(&result["ttl_s"])
+    );
+    if !keepalive {
+        return Ok(());
+    }
+    while !sleep_or_stop(BIND_KEEPALIVE, &stop, None) {
+        s.call("agent.bind", params.clone())
+            .map_err(bind_rpc_fail)?;
+    }
+    // Ao sair, o daemon detecta o pid ausente e registra `unbound process_gone`.
+    Ok(())
+}
+
 /// Estado do `watch` entre reconexoes (v1.1 + opcoes da v1.2).
 struct WatchState {
     /// Ultimo seq visto (nunca imprime duas vezes).
@@ -498,10 +586,7 @@ enum WatchErr {
 fn classify(e: Rpc) -> WatchErr {
     match e {
         Rpc::Io(_) => WatchErr::Retry,
-        Rpc::Server { code, message } => {
-            WatchErr::Fatal(Failure::Run(format!("{code}: {message}")))
-        }
-        Rpc::NoToken => WatchErr::Fatal(Failure::Bad(NO_TOKEN_MSG.to_string())),
+        e => WatchErr::Fatal(rpc_fail(e)),
     }
 }
 
@@ -839,6 +924,20 @@ fn log_line(v: &Value) -> String {
             txt(&v["claimed"]),
             txt(&v["peer_pid"]),
             txt(&v["peer_uid"])
+        )),
+        "bound" => s.push_str(&format!(
+            " name={} mux={} pane={} pid={}",
+            esc(&txt(&v["name"])),
+            esc(&txt(&v["mux"])),
+            esc(&txt(&v["pane"])),
+            txt(&v["peer_pid"])
+        )),
+        "unbound" => s.push_str(&format!(
+            " name={} mux={} pane={} reason={}",
+            esc(&txt(&v["name"])),
+            esc(&txt(&v["mux"])),
+            esc(&txt(&v["pane"])),
+            txt(&v["reason"])
         )),
         _ => {}
     }

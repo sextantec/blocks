@@ -12,13 +12,15 @@ use crate::protocol::valid_name;
 pub enum Delivery {
     /// Campainha no painel `pane` (adaptador herdr).
     Bell { pane: String },
+    /// Campainha no painel validado mais recentemente por `agent.bind`.
+    Auto,
     /// Sem campainha: o agente usa `chatd watch`.
     Watch,
 }
 
 impl Delivery {
     pub fn is_bell(&self) -> bool {
-        matches!(self, Delivery::Bell { .. })
+        matches!(self, Delivery::Bell { .. } | Delivery::Auto)
     }
 }
 
@@ -26,6 +28,7 @@ impl Delivery {
 pub struct Config {
     pub auth_required: bool,
     pub herdr_bin: String,
+    pub tmux_bin: String,
     pub bell_poll_ms: u64,
     pub bell_rearm_s: u64,
     pub recipients: BTreeMap<String, Delivery>,
@@ -36,6 +39,7 @@ pub struct Config {
 struct Raw {
     auth: Option<String>,
     herdr_bin: Option<String>,
+    tmux_bin: Option<String>,
     bell_poll_ms: Option<u64>,
     bell_rearm_s: Option<u64>,
     #[serde(default)]
@@ -66,6 +70,10 @@ pub fn parse(text: &str) -> Result<Config, String> {
     if herdr_bin.is_empty() || herdr_bin.contains('\0') {
         return Err("config: herdr_bin invalido".to_string());
     }
+    let tmux_bin = raw.tmux_bin.unwrap_or_else(|| "tmux".to_string());
+    if tmux_bin.is_empty() || tmux_bin.contains('\0') {
+        return Err("config: tmux_bin invalido".to_string());
+    }
     let bell_poll_ms = raw.bell_poll_ms.unwrap_or(5000);
     if bell_poll_ms < 50 {
         return Err("config: bell_poll_ms deve ser de no minimo 50".to_string());
@@ -85,6 +93,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(Config {
         auth_required,
         herdr_bin,
+        tmux_bin,
         bell_poll_ms,
         bell_rearm_s,
         recipients,
@@ -101,17 +110,18 @@ fn parse_delivery(name: &str, rec: RawRecipient) -> Result<Delivery, String> {
         (Some("watch"), Some(_)) => Err(format!(
             "config: '{name}' com delivery watch nao aceita pane"
         )),
+        (Some("auto"), None) => Ok(Delivery::Auto),
+        (Some("auto"), Some(_)) => Err(format!(
+            "config: '{name}' com delivery auto nao aceita pane"
+        )),
         (None, _) => Err(format!("config: '{name}' sem delivery (bell ou watch)")),
         (Some(_), _) => Err(format!(
-            "config: delivery de '{name}' deve ser bell ou watch"
+            "config: delivery de '{name}' deve ser bell, watch ou auto"
         )),
     }
 }
 
 /// Pane do herdr: 1 a 64 caracteres de `[A-Za-z0-9:._-]`, sem comecar por `-`.
 pub fn valid_pane(s: &str) -> bool {
-    (1..=64).contains(&s.len())
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'))
+    crate::protocol::valid_pane_id_with(s, 64, false)
 }

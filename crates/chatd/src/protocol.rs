@@ -15,13 +15,14 @@ pub const LIST_MAX: u64 = 200;
 pub const KINDS: [&str; 5] = ["AVISO", "PEDIDO", "PERGUNTA", "RESPOSTA", "ACK"];
 pub const REF_TYPES: [&str; 5] = ["path", "commit", "msg", "job", "url"];
 /// Metodos disponiveis depois da autenticacao (ou sempre, com `auth: off`).
-pub const METHODS: [&str; 6] = [
+pub const METHODS: [&str; 7] = [
     "message.send",
     "message.list",
     "message.take",
     "message.ack",
     "events.resume",
     "status",
+    "agent.bind",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -91,6 +92,21 @@ pub fn check_name(s: &str, path: &str) -> Result<(), ApiError> {
     } else {
         Err(ApiError::invalid(path, "nome invalido"))
     }
+}
+
+/// Pane id passado como argumento de subprocesso (sem shell ou controles).
+pub fn valid_pane_id(s: &str) -> bool {
+    valid_pane_id_with(s, 128, true)
+}
+
+pub fn valid_pane_id_with(s: &str, max_len: usize, allow_percent: bool) -> bool {
+    (1..=max_len).contains(&s.len())
+        && !s.starts_with('-')
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b':' | b'.' | b'_' | b'-')
+                || (allow_percent && b == b'%')
+        })
 }
 
 /// Identidade: com conexao autenticada (`who` = Some), campo ausente vira a identidade e
@@ -403,6 +419,29 @@ pub fn parse_ack(p: &Map<String, Value>) -> Result<AckParams, ApiError> {
         stage: stage.to_string(),
         result,
         note,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindParams {
+    pub mux: String,
+    pub pane: String,
+}
+
+pub fn parse_bind(p: &Map<String, Value>) -> Result<BindParams, ApiError> {
+    reject_unknown(p, &["mux", "pane", "name"])?;
+    let _ = opt_str(p, "name")?;
+    let mux = req_str(p, "mux")?;
+    if !matches!(mux, "herdr" | "tmux") {
+        return Err(ApiError::invalid("/mux", "mux deve ser herdr ou tmux"));
+    }
+    let pane = req_str(p, "pane")?;
+    if !valid_pane_id(pane) {
+        return Err(ApiError::invalid("/pane", "pane invalido"));
+    }
+    Ok(BindParams {
+        mux: mux.to_string(),
+        pane: pane.to_string(),
     })
 }
 

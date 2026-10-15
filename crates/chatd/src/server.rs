@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 
 use crate::auth;
 use crate::bell;
+use crate::binding::{self, Binding, Mux, Registry, TTL};
 use crate::config::Config;
 use crate::protocol::{self, ApiError, MAX_LINE};
 use crate::store::{Store, msg_json};
@@ -75,12 +76,13 @@ fn prune_pids(m: &mut HashMap<i32, PidAuth>, now: Instant) {
 
 pub struct Shared {
     pub store: Mutex<Store>,
+    pub bindings: Mutex<Registry>,
     pub cfg: Config,
     pub auth_path: PathBuf,
     pids: Mutex<HashMap<i32, PidAuth>>,
 }
 
-pub fn lock(m: &Mutex<Store>) -> MutexGuard<'_, Store> {
+pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -91,6 +93,7 @@ struct Conn {
     cursor: Option<u64>,
     peer_uid: u32,
     peer_pid: i32,
+    last_watch_renew: Instant,
 }
 
 struct ActiveGuard(Arc<AtomicUsize>);
@@ -121,6 +124,7 @@ pub fn run(
 
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
+        bindings: Mutex::new(Registry::default()),
         cfg,
         auth_path,
         pids: Mutex::new(HashMap::new()),
@@ -132,6 +136,10 @@ pub fn run(
     } else {
         None
     };
+    let binding_shared = Arc::clone(&shared);
+    let binding_shutdown = Arc::clone(&shutdown);
+    let binding_handle =
+        thread::spawn(move || binding::maintain(&binding_shared, &binding_shutdown));
 
     println!("chatd: ready");
     let _ = io::stdout().flush();
@@ -180,6 +188,7 @@ pub fn run(
     if let Some(h) = bell_handle {
         let _ = h.join();
     }
+    let _ = binding_handle.join();
     let _ = fs::remove_file(socket);
     Ok(())
 }
@@ -247,6 +256,7 @@ fn serve_conn(mut stream: UnixStream, shared: &Shared, shutdown: &AtomicBool, ui
         cursor: None,
         peer_uid: uid,
         peer_pid: pid,
+        last_watch_renew: Instant::now(),
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -314,7 +324,11 @@ fn push_events(
             .into_iter()
             .filter_map(|ev| {
                 let seq = ev.get("seq").and_then(Value::as_u64)?;
-                let visible = who.is_none_or(|w| st.visible(&ev, w));
+                let internal = matches!(
+                    ev.get("type").and_then(Value::as_str),
+                    Some("auth_failed" | "denied" | "bound" | "unbound")
+                );
+                let visible = !internal && who.is_none_or(|w| st.visible(&ev, w));
                 Some((seq, visible.then_some(ev)))
             })
             .collect()
@@ -349,17 +363,25 @@ fn handle_line(line: &[u8], shared: &Shared, conn: &mut Conn) -> (Value, bool) {
         }
     }
     let who = conn.identity.clone();
-    match dispatch(
-        &req.method,
-        &req.params,
-        shared,
-        who.as_deref(),
-        &mut conn.cursor,
-    ) {
+    if req.method == "status"
+        && conn.cursor.is_some()
+        && conn.last_watch_renew.elapsed() >= Duration::from_secs(30)
+        && let Some(name) = who.as_deref()
+    {
+        lock(&shared.bindings).renew_for_watch(name, Instant::now());
+        conn.last_watch_renew = Instant::now();
+    }
+    match dispatch(&req.method, &req.params, shared, conn) {
         Ok(result) => (ok_reply(req.id.clone(), result), false),
         Err(e) => {
             if e.code == "forbidden" {
-                record_denied(shared, conn, &req.method, &req.params);
+                record_denied(
+                    shared,
+                    conn,
+                    &req.method,
+                    &req.params,
+                    conn.identity.as_deref(),
+                );
             }
             (error_reply(req.id.clone(), &e), false)
         }
@@ -367,17 +389,27 @@ fn handle_line(line: &[u8], shared: &Shared, conn: &mut Conn) -> (Value, bool) {
 }
 
 /// Rastro de `forbidden` (spec F.2): so o metodo, o peer e o nome pretendido (se for nome valido).
-fn record_denied(shared: &Shared, conn: &Conn, method: &str, p: &Map<String, Value>) {
+fn record_denied(
+    shared: &Shared,
+    conn: &Conn,
+    method: &str,
+    p: &Map<String, Value>,
+    who: Option<&str>,
+) {
     let field = match method {
         "message.send" => "from",
         "message.list" | "message.take" => "to",
         "message.ack" => "by",
+        "agent.bind" => "name",
         _ => return,
     };
-    let claimed = p
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|s| protocol::valid_name(s));
+    let claimed = if method == "agent.bind" {
+        who.filter(|s| protocol::valid_name(s))
+    } else {
+        p.get(field)
+            .and_then(Value::as_str)
+            .filter(|s| protocol::valid_name(s))
+    };
     let _ = lock(&shared.store).denied(method, conn.peer_uid, conn.peer_pid, claimed);
 }
 
@@ -459,13 +491,73 @@ fn pid_failure(shared: &Shared, pid: i32, now: Instant) -> bool {
     }
 }
 
+fn bind_agent(
+    params: &Map<String, Value>,
+    shared: &Shared,
+    who: Option<&str>,
+    peer_pid: i32,
+) -> Result<Value, ApiError> {
+    let Some(name) = who else {
+        return Err(ApiError::unauthenticated());
+    };
+    protocol::check_name(name, "/name")?;
+    if !shared.cfg.recipients.contains_key(name) {
+        return Err(ApiError::new(
+            "unknown_recipient",
+            format!("destinatario '{name}' nao configurado"),
+        ));
+    }
+    let params = protocol::parse_bind(params)?;
+    let mux = if params.mux == "herdr" {
+        Mux::Herdr
+    } else {
+        Mux::Tmux
+    };
+    if !binding::verify(&shared.cfg, name, mux, &params.pane, peer_pid) {
+        return Err(ApiError::new(
+            "forbidden",
+            "painel nao comprovado para esta identidade",
+        ));
+    }
+    let now = Instant::now();
+    let mut bindings = lock(&shared.bindings);
+    if let Some(old) = bindings.get(name).cloned() {
+        lock(&shared.store).unbound(name, &old.mux.to_string(), &old.pane, "replaced")?;
+        bindings.remove(name);
+    }
+    lock(&shared.store).bound(name, &mux.to_string(), &params.pane, peer_pid)?;
+    bindings.replace(
+        name.to_string(),
+        Binding {
+            mux,
+            pane: params.pane.clone(),
+            peer_pid,
+            expires_at: now + TTL,
+        },
+    );
+    Ok(json!({
+        "v": 1,
+        "name": name,
+        "mux": mux.to_string(),
+        "pane": params.pane,
+        "ttl_s": TTL.as_secs()
+    }))
+}
+
 fn dispatch(
     method: &str,
     p: &Map<String, Value>,
     shared: &Shared,
-    who: Option<&str>,
-    cursor: &mut Option<u64>,
+    conn: &mut Conn,
 ) -> Result<Value, ApiError> {
+    let Conn {
+        identity,
+        cursor,
+        peer_pid,
+        ..
+    } = conn;
+    let who = identity.as_deref();
+    let peer_pid = *peer_pid;
     if !protocol::METHODS.contains(&method) {
         return Err(ApiError::new(
             "method_not_found",
@@ -474,6 +566,7 @@ fn dispatch(
     }
     protocol::check_version(p)?;
     match method {
+        "agent.bind" => bind_agent(p, shared, who, peer_pid),
         "message.send" => {
             let sp = protocol::parse_send(p)?;
             let from = protocol::resolve(sp.from.clone(), who, "/from")?;

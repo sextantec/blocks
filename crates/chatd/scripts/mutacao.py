@@ -93,6 +93,7 @@ M = [
  ("V23","src/server.rs","if m.len() <= PID_CAP {\n        return;","if true {\n        return;","mapa de pids sem teto"),
  ("V24","src/server.rs","locked || !e.fails.is_empty()","true","mapa de pids nunca poda"),
  ("V25","src/server.rs","if e.fails.len() >= AUTH_MAX_FAILS {\n        e.fails.clear();","if e.fails.len() > AUTH_MAX_FAILS {\n        e.fails.clear();","trava do pid so na 6a falha"),
+ ("V26","src/server.rs","if !binding::verify(&shared.cfg, name, mux, &params.pane, peer_pid) {","if false {","bind sem verificar que o painel pertence ao processo"),
  ("T01","src/store.rs","m.to == to && m.state == State::Registrado","m.state == State::Registrado","take pega mensagens de outro destinatario"),
  ("T02","src/store.rs","sel.truncate(limit);","sel.truncate(limit + 1);","take passa do limite"),
  ("T03","src/store.rs","        sel.sort();\n        sel.truncate","        sel.sort_by(|a, b| b.cmp(a));\n        sel.truncate","take em ordem decrescente"),

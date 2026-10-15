@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::binding::{self, Binding, Mux};
 use crate::config::Delivery;
 use crate::server::{Shared, lock};
 
@@ -14,25 +15,25 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(5);
 const CMD_OUT_MAX: u64 = 64 * 1024;
 const TICK: Duration = Duration::from_millis(50);
 
+struct RingTarget {
+    mux: Mux,
+    pane: String,
+    binding: Option<Binding>,
+}
+
 pub fn run(shared: &Shared, shutdown: &AtomicBool) {
     let poll = Duration::from_millis(shared.cfg.bell_poll_ms);
     let rearm = Duration::from_secs(shared.cfg.bell_rearm_s);
     while !shutdown.load(Ordering::SeqCst) {
-        let due: Vec<(String, String)> = {
+        let due: Vec<String> = {
             let st = lock(&shared.store);
-            st.bell_due(rearm, Instant::now())
-                .into_iter()
-                .filter_map(|name| match shared.cfg.recipients.get(&name) {
-                    Some(Delivery::Bell { pane }) => Some((name.clone(), pane.clone())),
-                    _ => None,
-                })
-                .collect()
+            st.bell_due(rearm, Instant::now()).into_iter().collect()
         };
-        for (name, pane) in due {
+        for name in due {
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            ring(shared, &name, &pane);
+            ring(shared, &name);
         }
         let until = Instant::now() + poll;
         while Instant::now() < until && !shutdown.load(Ordering::SeqCst) {
@@ -41,25 +42,107 @@ pub fn run(shared: &Shared, shutdown: &AtomicBool) {
     }
 }
 
-fn ring(shared: &Shared, name: &str, pane: &str) {
-    let bin = shared.cfg.herdr_bin.as_str();
-    match run_herdr(bin, &["agent", "get", pane]).and_then(|out| agent_status(&out)) {
+fn ring(shared: &Shared, name: &str) {
+    let target = match resolve_target(shared, name) {
+        Ok(target) => target,
         Err(reason) => return record_failed(shared, name, reason),
-        Ok(s) if s != "idle" && s != "done" => return,
-        Ok(_) => {}
+    };
+    let Some(target) = target else {
+        return;
+    };
+    if let Some(binding) = &target.binding
+        && !binding::verify(
+            &shared.cfg,
+            name,
+            target.mux,
+            &target.pane,
+            binding.peer_pid,
+        )
+    {
+        return record_failed(shared, name, "unbound");
     }
     let n = lock(&shared.store).pending_count(name);
     if n == 0 {
         return;
     }
-    let text = prompt_text(n);
-    match run_herdr(bin, &["agent", "prompt", pane, &text]) {
-        Ok(_) => {
+    match send_prompt(shared, target.mux, &target.pane, n) {
+        Ok(true) => {
             if let Err(e) = lock(&shared.store).bell_sent(name, Instant::now()) {
                 eprintln!("chatd: aviso: nao registrei bell_sent: {}", e.message);
             }
         }
+        Ok(false) => {}
         Err(reason) => record_failed(shared, name, reason),
+    }
+}
+
+fn resolve_target(shared: &Shared, name: &str) -> Result<Option<RingTarget>, &'static str> {
+    let binding = active_binding(shared, name);
+    match (shared.cfg.recipients.get(name), binding) {
+        (Some(Delivery::Auto), Some(binding)) => Ok(Some(RingTarget {
+            mux: binding.mux,
+            pane: binding.pane.clone(),
+            binding: Some(binding),
+        })),
+        (Some(Delivery::Auto), None) => Err("unbound"),
+        (Some(Delivery::Bell { .. }), Some(binding)) => Ok(Some(RingTarget {
+            mux: binding.mux,
+            pane: binding.pane.clone(),
+            binding: Some(binding),
+        })),
+        (Some(Delivery::Bell { pane }), None) => Ok(Some(RingTarget {
+            mux: Mux::Herdr,
+            pane: pane.clone(),
+            binding: None,
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn send_prompt(
+    shared: &Shared,
+    mux: Mux,
+    pane: &str,
+    pending: usize,
+) -> Result<bool, &'static str> {
+    let text = prompt_text(pending);
+    match mux {
+        Mux::Herdr => {
+            let status = run_herdr(shared.cfg.herdr_bin.as_str(), &["agent", "get", pane])
+                .and_then(|out| agent_status(&out))?;
+            if status != "idle" && status != "done" {
+                return Ok(false);
+            }
+            run_herdr(
+                shared.cfg.herdr_bin.as_str(),
+                &["agent", "prompt", pane, &text],
+            )
+            .map(|_| true)
+        }
+        Mux::Tmux => run_herdr(
+            shared.cfg.tmux_bin.as_str(),
+            &["send-keys", "-t", pane, "-l", &text],
+        )
+        .and_then(|_| {
+            run_herdr(
+                shared.cfg.tmux_bin.as_str(),
+                &["send-keys", "-t", pane, "Enter"],
+            )
+        })
+        .map(|_| true),
+    }
+}
+
+fn active_binding(shared: &Shared, name: &str) -> Option<Binding> {
+    let binding = lock(&shared.bindings).get(name).cloned();
+    if binding
+        .as_ref()
+        .is_some_and(|b| Instant::now() >= b.expires_at || !binding::is_process_alive(b.peer_pid))
+    {
+        binding::reap_now(shared, Instant::now());
+        None
+    } else {
+        binding
     }
 }
 
@@ -83,7 +166,7 @@ fn agent_status(out: &str) -> Result<String, &'static str> {
 }
 
 /// Executa `bin args...` sem shell, com limite de 5 s. Devolve a saida ou um motivo curto.
-fn run_herdr(bin: &str, args: &[&str]) -> Result<String, &'static str> {
+pub(crate) fn run_herdr(bin: &str, args: &[&str]) -> Result<String, &'static str> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())

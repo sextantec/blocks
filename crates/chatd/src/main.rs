@@ -2,6 +2,7 @@
 
 mod auth;
 mod bell;
+mod binding;
 mod client;
 mod config;
 mod hash;
@@ -21,6 +22,7 @@ chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [
 chatd inbox [--as N] [--after SEQ] [--all] [--take] [--ids] [--json]\n     \
 chatd ack --id ID [--as N] --stage aceito|resultado [--result R] [--note T]\n     \
 chatd watch [--as N] [--from-start]\n     \
+chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]\n     \
 chatd status [--as N] [--json]\n     \
 chatd log --state-dir D [--tail N]\n     \
 chatd token new|revoke NOME --state-dir D | token list --state-dir D\n     \
@@ -29,6 +31,8 @@ clientes: --socket, CHATD_SOCKET, --state-dir ou CHATD_STATE_DIR; identidade: --
 pub enum Failure {
     Usage(String),
     Run(String),
+    BindForbidden(String),
+    Unavailable(String),
     /// Erro de uso sem a ajuda longa (saida 2): so a linha `chatd: <msg>`.
     Bad(String),
 }
@@ -136,6 +140,14 @@ fn main() {
             eprintln!("chatd: {m}");
             1
         }
+        Err(Failure::BindForbidden(m)) => {
+            eprintln!("chatd: {m}");
+            3
+        }
+        Err(Failure::Unavailable(m)) => {
+            eprintln!("chatd: {m}");
+            4
+        }
     };
     std::process::exit(code);
 }
@@ -150,6 +162,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "inbox" => client::inbox(rest),
         "ack" => client::ack(rest),
         "watch" => client::watch(rest),
+        "bind" => client::bind(rest),
         "status" => client::status(rest),
         "log" => client::log(rest),
         "token" => auth::cli(rest),
