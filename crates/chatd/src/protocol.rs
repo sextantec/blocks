@@ -15,7 +15,7 @@ pub const LIST_MAX: u64 = 200;
 pub const KINDS: [&str; 5] = ["AVISO", "PEDIDO", "PERGUNTA", "RESPOSTA", "ACK"];
 pub const REF_TYPES: [&str; 5] = ["path", "commit", "msg", "job", "url"];
 /// Metodos disponiveis depois da autenticacao (ou sempre, com `auth: off`).
-pub const METHODS: [&str; 7] = [
+pub const METHODS: [&str; 8] = [
     "message.send",
     "message.list",
     "message.take",
@@ -23,6 +23,7 @@ pub const METHODS: [&str; 7] = [
     "events.resume",
     "status",
     "agent.bind",
+    "message.get",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -443,6 +444,15 @@ pub fn parse_bind(p: &Map<String, Value>) -> Result<BindParams, ApiError> {
         mux: mux.to_string(),
         pane: pane.to_string(),
     })
+}
+
+pub fn parse_get(p: &Map<String, Value>) -> Result<String, ApiError> {
+    reject_unknown(p, &["id"])?;
+    let id = req_str(p, "id")?;
+    if !valid_id(id) {
+        return Err(ApiError::invalid("/id", "id invalido"));
+    }
+    Ok(id.to_string())
 }
 
 pub struct ListParams {

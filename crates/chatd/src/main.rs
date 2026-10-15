@@ -21,7 +21,8 @@ const USAGE: &str = "uso: chatd serve --state-dir DIR --config FILE [--socket PA
 chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [--thread ID] [--id ID] [--ref t:v]... [--json]\n     \
 chatd inbox [--as N] [--after SEQ] [--all] [--take] [--ids] [--json]\n     \
 chatd ack --id ID [--as N] --stage aceito|resultado [--result R] [--note T]\n     \
-chatd watch [--as N] [--from-start]\n     \
+chatd watch [--as N] [--from-start] [--receipts]\n     \
+chatd show --id ID [--as N] [--json]\n     \
 chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]\n     \
 chatd status [--as N] [--json]\n     \
 chatd log --state-dir D [--tail N]\n     \
@@ -162,6 +163,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "inbox" => client::inbox(rest),
         "ack" => client::ack(rest),
         "watch" => client::watch(rest),
+        "show" => client::show(rest),
         "bind" => client::bind(rest),
         "status" => client::status(rest),
         "log" => client::log(rest),

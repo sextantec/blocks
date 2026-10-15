@@ -104,7 +104,11 @@ pub fn verify(cfg: &Config, name: &str, mux: Mux, pane: &str, peer_pid: i32) -> 
             let Some(cwd) = agent.pointer("/cwd").and_then(Value::as_str) else {
                 return false;
             };
-            if agent_type != name || same_path(cwd, &peer_cwd).is_none() {
+            let expected = cfg
+                .recipients
+                .get(name)
+                .map(|recipient| recipient.agent.as_str());
+            if Some(agent_type) != expected || same_path(cwd, &peer_cwd).is_none() {
                 return false;
             }
             // Algumas versoes do herdr podem passar a publicar pane_pid/pid. Se vier,

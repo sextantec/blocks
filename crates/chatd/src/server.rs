@@ -91,6 +91,7 @@ struct Conn {
     identity: Option<String>,
     failures: usize,
     cursor: Option<u64>,
+    receipts: bool,
     peer_uid: u32,
     peer_pid: i32,
     last_watch_renew: Instant,
@@ -254,6 +255,7 @@ fn serve_conn(mut stream: UnixStream, shared: &Shared, shutdown: &AtomicBool, ui
         identity: None,
         failures: 0,
         cursor: None,
+        receipts: false,
         peer_uid: uid,
         peer_pid: pid,
         last_watch_renew: Instant::now(),
@@ -284,7 +286,14 @@ fn serve_conn(mut stream: UnixStream, shared: &Shared, shutdown: &AtomicBool, ui
             return;
         }
         if let Some(c) = conn.cursor.as_mut()
-            && push_events(&mut stream, shared, c, conn.identity.as_deref()).is_err()
+            && push_events(
+                &mut stream,
+                shared,
+                c,
+                conn.identity.as_deref(),
+                conn.receipts,
+            )
+            .is_err()
         {
             return;
         }
@@ -314,6 +323,7 @@ fn push_events(
     shared: &Shared,
     cursor: &mut u64,
     who: Option<&str>,
+    receipts: bool,
 ) -> io::Result<()> {
     if shared.cfg.auth_required && who.is_none() {
         return Ok(());
@@ -328,8 +338,16 @@ fn push_events(
                     ev.get("type").and_then(Value::as_str),
                     Some("auth_failed" | "denied" | "bound" | "unbound")
                 );
-                let visible = !internal && who.is_none_or(|w| st.visible(&ev, w));
-                Some((seq, visible.then_some(ev)))
+                let output = if internal {
+                    None
+                } else if receipts {
+                    who.and_then(|w| st.receipt_event(&ev, w))
+                } else if who.is_none_or(|w| st.visible(&ev, w)) {
+                    Some(ev)
+                } else {
+                    None
+                };
+                Some((seq, output))
             })
             .collect()
     };
@@ -553,6 +571,7 @@ fn dispatch(
     let Conn {
         identity,
         cursor,
+        receipts: conn_receipts,
         peer_pid,
         ..
     } = conn;
@@ -626,6 +645,14 @@ fn dispatch(
             }
             Ok(v)
         }
+        "message.get" => {
+            let id = protocol::parse_get(p)?;
+            let message = who
+                .and_then(|name| lock(&shared.store).get_for(&id, name))
+                .ok_or_else(|| ApiError::new("unknown_message", "mensagem nao encontrada"))?;
+            let head_seq = lock(&shared.store).head();
+            Ok(json!({"v": 1, "message": msg_json(&message), "head_seq": head_seq}))
+        }
         "events.resume" => {
             if cursor.is_some() {
                 return Err(ApiError::new(
@@ -633,7 +660,8 @@ fn dispatch(
                     "events.resume ja foi chamado nesta conexao",
                 ));
             }
-            protocol::reject_unknown(p, &["last_seq"])?;
+            protocol::reject_unknown(p, &["last_seq", "receipts"])?;
+            *conn_receipts = protocol::opt_bool(p, "receipts")?.unwrap_or(false);
             let last = protocol::req_u64(p, "last_seq")?;
             let head = lock(&shared.store).head();
             if last > head {

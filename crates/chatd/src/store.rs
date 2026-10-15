@@ -476,6 +476,34 @@ impl Store {
         v.into_iter().take(limit).cloned().collect()
     }
 
+    /// `message.get` so revela mensagens enviadas ou recebidas pela identidade.
+    pub fn get_for(&self, id: &str, who: &str) -> Option<Msg> {
+        self.msgs
+            .get(id)
+            .filter(|m| m.from == who || m.to == who)
+            .cloned()
+    }
+
+    /// Evento que pode aparecer em `watch --receipts`: mensagens recebidas e recibos enviados.
+    pub fn receipt_event(&self, ev: &Value, who: &str) -> Option<Value> {
+        let kind = ev.get("type").and_then(Value::as_str)?;
+        if kind == "registered" {
+            return (ev.get("from").and_then(Value::as_str) == Some(who)
+                || ev.get("to").and_then(Value::as_str) == Some(who))
+            .then(|| ev.clone());
+        }
+        if !matches!(kind, "accepted" | "resulted") {
+            return None;
+        }
+        let id = ev.get("id").and_then(Value::as_str)?;
+        let message = self.msgs.get(id).filter(|m| m.from == who && m.to != who)?;
+        let mut visible = ev.clone();
+        if let Some(obj) = visible.as_object_mut() {
+            obj.insert("receipt_to".into(), json!(message.to));
+        }
+        Some(visible)
+    }
+
     /// `message.take` (v1.1 C.1): sob o lock do servidor, marca como `aceito` (note "take") as
     /// mensagens `registrado` de `to`, em ordem de seq, ate `limit`, e devolve-as.
     pub fn take(&mut self, to: &str, limit: usize) -> Result<Vec<Msg>, ApiError> {

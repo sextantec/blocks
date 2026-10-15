@@ -18,6 +18,18 @@ pub enum Delivery {
     Watch,
 }
 
+#[derive(Debug, Clone)]
+pub struct Recipient {
+    pub delivery: Delivery,
+    pub agent: String,
+}
+
+impl Recipient {
+    pub fn is_bell(&self) -> bool {
+        self.delivery.is_bell()
+    }
+}
+
 impl Delivery {
     pub fn is_bell(&self) -> bool {
         matches!(self, Delivery::Bell { .. } | Delivery::Auto)
@@ -31,7 +43,7 @@ pub struct Config {
     pub tmux_bin: String,
     pub bell_poll_ms: u64,
     pub bell_rearm_s: u64,
-    pub recipients: BTreeMap<String, Delivery>,
+    pub recipients: BTreeMap<String, Recipient>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +63,7 @@ struct Raw {
 struct RawRecipient {
     delivery: Option<String>,
     pane: Option<String>,
+    agent: Option<String>,
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {
@@ -87,8 +100,16 @@ pub fn parse(text: &str) -> Result<Config, String> {
         if !valid_name(&name) {
             return Err(format!("config: nome de destinatario invalido '{name}'"));
         }
+        let agent = rec.agent.clone().unwrap_or_else(|| {
+            name.split_once('-')
+                .map_or(name.as_str(), |(prefix, _)| prefix)
+                .to_string()
+        });
+        if !valid_name(&agent) {
+            return Err(format!("config: agent de '{name}' invalido"));
+        }
         let delivery = parse_delivery(&name, rec)?;
-        recipients.insert(name, delivery);
+        recipients.insert(name, Recipient { delivery, agent });
     }
     Ok(Config {
         auth_required,

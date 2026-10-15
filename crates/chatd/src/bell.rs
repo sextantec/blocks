@@ -78,7 +78,10 @@ fn ring(shared: &Shared, name: &str) {
 
 fn resolve_target(shared: &Shared, name: &str) -> Result<Option<RingTarget>, &'static str> {
     let binding = active_binding(shared, name);
-    match (shared.cfg.recipients.get(name), binding) {
+    match (
+        shared.cfg.recipients.get(name).map(|r| &r.delivery),
+        binding,
+    ) {
         (Some(Delivery::Auto), Some(binding)) => Ok(Some(RingTarget {
             mux: binding.mux,
             pane: binding.pane.clone(),

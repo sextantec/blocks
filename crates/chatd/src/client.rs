@@ -1,5 +1,6 @@
 //! Subcomandos do cliente: `send`, `inbox`, `ack`, `status`, `watch` e `log` (spec v1 4 e v1.1 D).
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -574,6 +575,8 @@ struct WatchState {
     deadline: Option<Instant>,
     /// Espera da proxima tentativa com `--reconnect` (1, 2, 4, 8, 16, 30, 30...).
     backoff: u64,
+    receipts: bool,
+    seen: HashMap<String, String>,
 }
 
 enum WatchErr {
@@ -678,7 +681,7 @@ fn sleep_or_stop(d: Duration, stop: &AtomicBool, deadline: Option<Instant>) -> b
 pub fn watch(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "resume-file", "exit-after", "heartbeat-file"]);
-    let o = parse_opts(args, &vals, &["from-start", "reconnect"])?;
+    let o = parse_opts(args, &vals, &["from-start", "reconnect", "receipts"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "watch")?.to_string();
     let socket = socket_path(&o)?;
@@ -715,6 +718,8 @@ pub fn watch(args: &[String]) -> Result<(), Failure> {
         heartbeat: o.get("heartbeat-file").map(PathBuf::from),
         deadline,
         backoff: 1,
+        receipts: o.flag("receipts"),
+        seen: HashMap::new(),
     };
     if let Some(path) = st.resume_file.clone()
         && path.exists()
@@ -792,8 +797,11 @@ fn watch_once(
         st.head_check = false;
     }
     let from = st.last.unwrap_or(0);
-    s.call("events.resume", json!({"v": 1, "last_seq": from}))
-        .map_err(classify)?;
+    s.call(
+        "events.resume",
+        json!({"v": 1, "last_seq": from, "receipts": st.receipts}),
+    )
+    .map_err(classify)?;
     // Conectado e autenticado: zera a espera de --reconnect e registra o heartbeat (v1.2 C).
     st.backoff = 1;
     let mut last_hb = Instant::now();
@@ -819,27 +827,7 @@ fn watch_once(
             Err(_) => return Err(WatchErr::Retry),
         };
         if v.get("method").and_then(Value::as_str) == Some("event") {
-            let ev = &v["params"];
-            let Some(seq) = ev["seq"].as_u64() else {
-                continue;
-            };
-            if st.last.is_none_or(|l| seq > l) {
-                if ev["type"] == json!("registered") && ev["to"].as_str() == Some(name) {
-                    let line = format!(
-                        "{} {} {} {}>{} | {}",
-                        seq,
-                        txt(&ev["id"]),
-                        txt(&ev["kind"]),
-                        txt(&ev["from"]),
-                        txt(&ev["to"]),
-                        txt(&ev["subject"])
-                    );
-                    let _ = writeln!(out, "{line}");
-                    let _ = out.flush();
-                }
-                st.last = Some(seq);
-                persist_cursor(st, seq)?;
-            }
+            consume_watch_event(&v["params"], name, st, &mut out)?;
         } else if v
             .get("error")
             .and_then(|e| e.get("code"))
@@ -851,6 +839,109 @@ fn watch_once(
             )));
         }
     }
+}
+
+fn consume_watch_event(
+    ev: &Value,
+    name: &str,
+    st: &mut WatchState,
+    out: &mut impl Write,
+) -> Result<(), WatchErr> {
+    let Some(seq) = ev["seq"].as_u64() else {
+        return Ok(());
+    };
+    if st.last.is_some_and(|last| seq <= last) {
+        return Ok(());
+    }
+    if ev["type"] == json!("registered") {
+        if st.receipts && ev["from"].as_str() == Some(name) {
+            st.seen.insert(txt(&ev["id"]), txt(&ev["subject"]));
+        }
+        if ev["to"].as_str() == Some(name) {
+            let line = format!(
+                "{} {} {} {}>{} | {}",
+                seq,
+                txt(&ev["id"]),
+                txt(&ev["kind"]),
+                txt(&ev["from"]),
+                txt(&ev["to"]),
+                txt(&ev["subject"])
+            );
+            let _ = writeln!(out, "{line}");
+            let _ = out.flush();
+        }
+    } else if st.receipts && matches!(ev["type"].as_str(), Some("accepted" | "resulted")) {
+        print_receipt(ev, seq, st, out);
+    }
+    st.last = Some(seq);
+    persist_cursor(st, seq)
+}
+
+fn print_receipt(ev: &Value, seq: u64, st: &WatchState, out: &mut impl Write) {
+    let stage = if ev["type"] == json!("accepted") {
+        "aceito".to_string()
+    } else {
+        format!("resultado:{}", txt(&ev["result"]))
+    };
+    let mut line = format!(
+        "RECIBO {} {} {} {}",
+        seq,
+        txt(&ev["id"]),
+        stage,
+        txt(&ev["receipt_to"])
+    );
+    if let Some(subject) = st.seen.get(&txt(&ev["id"])) {
+        line.push_str(" | ");
+        line.push_str(subject);
+    }
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+pub fn show(args: &[String]) -> Result<(), Failure> {
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.extend(["as", "id"]);
+    let o = parse_opts(args, &vals, &["json"])?;
+    let name = identity(&o, "as")?;
+    let name = need(&name, "show")?.to_string();
+    let mut s = open(&o, Some(&name))?;
+    let result = s
+        .call("message.get", json!({"v": 1, "id": o.req("id")?}))
+        .map_err(rpc_fail)?;
+    let message = &result["message"];
+    if o.flag("json") {
+        println!("{message}");
+        return Ok(());
+    }
+    println!(
+        "{} {} {}>{} {} | {}",
+        txt(&message["id"]),
+        txt(&message["state"]),
+        txt(&message["from"]),
+        txt(&message["to"]),
+        txt(&message["kind"]),
+        txt(&message["subject"])
+    );
+    println!("registrado  {}", txt(&message["registered_at"]));
+    if message["accepted_at"].is_string() {
+        let mut line = format!("aceito      {}", txt(&message["accepted_at"]));
+        if message["state"] == json!("aceito") && message["note"].is_string() {
+            line.push_str(&format!(" [{}]", txt(&message["note"])));
+        }
+        println!("{line}");
+    }
+    if message["resulted_at"].is_string() {
+        let mut line = format!(
+            "resultado   {} {}",
+            txt(&message["resulted_at"]),
+            txt(&message["result"])
+        );
+        if message["note"].is_string() {
+            line.push_str(&format!(" [{}]", txt(&message["note"])));
+        }
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn write_heartbeat(st: &WatchState) -> Result<(), WatchErr> {
