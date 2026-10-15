@@ -1,5 +1,7 @@
 # chatd v1.8: verificador `stale` (v1.7 + v1.7.1) e anexos com validade (RASCUNHO para decisao do Jabbur)
 
+> **Numeracao (decisao do Jabbur, 2026-10-15):** `v1.x` nomeia **iteracoes de spec**, nao lancamentos. A versao do pacote e **0.2.0** e nada muda; a versao 1.0 fica reservada para algo **muito estavel**. O `"v": 1` do protocolo e a compatibilidade no fio, outra coisa.
+
 Origem: decisoes do Jabbur (2026-10-15 noite). **Anexos:** "Se o arquivo fosse enviado ao chatd para ser disponibilizado em uma area compartilhada do projeto esse problema estaria resolvido" e, ao autorizar o rascunho: "ela ja deve incorporar a todas as anteriores que nao foram implementadas. O armazenamento de arquivos deve ter um limite de tempo (expiry-date) para evitar que fique muito cheio. Caso a mensagem seja direta e nao multitasking ou broadcast, o agente que recebeu deve remover o arquivo do armazenamento." **Stale:** v1.7 aprovada ("V1.7: Aprovado") e v1.7.1 ("6. Concordo"). Contrato escrito pelo Sextante; implementacao pelo `codex-blocks`; testes independentes pelo Haiku. **Esta spec e cumulativa:** quem implementa le so este arquivo; `spec-v1.7-stale.md` fica como historico (a Parte A abaixo a substitui) e os testes `tests/v17_stale.rs` continuam valendo.
 
 ## Entrega em duas partes (commits separados)
