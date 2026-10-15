@@ -374,8 +374,14 @@ pub fn caminho(r: &Value) -> String {
         .to_string()
 }
 
-pub fn agente(socket: &Path, id: &str) -> Value {
+/// Envelope completo de `agent.get`: `{v, agent: Agente, epoch, head_seq}` (spec secao 5).
+pub fn agente_envelope(socket: &Path, id: &str) -> Value {
     res(&rpc(socket, "agent.get", json!({"v": 1, "id": id})))
+}
+
+/// Objeto `Agente` de `agent.get` (campo `agent` do envelope).
+pub fn agente(socket: &Path, id: &str) -> Value {
+    agente_envelope(socket, id)["agent"].clone()
 }
 
 pub fn lista(socket: &Path) -> Vec<Value> {
