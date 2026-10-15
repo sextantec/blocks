@@ -44,3 +44,11 @@ O daemon leva ~30 a 50 ms para voltar numa troca de binario; um `chatd send` nes
 1. Codigo 5 novo e aceitavel ou prefere reaproveitar o 4 com mensagem distinta?
 2. A reconexao automatica do `send` e segura o bastante com `id` idempotente, ou so o `watch` deve reconectar?
 3. O aviso de `default_profile` deve ser silenciavel (`CHATD_QUIET=1`)? Proposta: nao, para o agente nunca nao ver.
+
+## Esclarecimentos (resolvem as ambiguidades dos testes independentes, 2026-10-15)
+1. **Formato de `whoami --json` (I4):** continua o da v1.5: objeto com `as`, `profile`, `socket`, `state_dir`, `token_file` e **`sources`** (objeto campo -> origem). Valores de origem: `flag`, `env`, `profile:NOME` (veio de um perfil escolhido por `--profile`/`CHATD_PROFILE`), `ignored` (so para `default_profile`, que e lido e nao usado). `config` deixa de existir como origem de identidade. `profile` e `null` quando nenhum perfil foi escolhido explicitamente. O token nunca aparece.
+2. **I5, "identidade jabbur":** significa `as == "jabbur"` com origem `profile:*` vinda de `CHATD_PROFILE` (e nao de `--profile` na linha). O aviso e emitido por `whoami` e por todo cliente que resolve identidade.
+3. **R1b:** apos a requisicao ter sido enviada e a conexao cair sem resposta, o cliente **nao repete** e sai com codigo **4**, imprimindo o `id` da mensagem para reconciliar por `chatd show --id`.
+4. **R2:** as 4 tentativas (1 + 3 repeticoes) sao contadas pelo falso; o tempo total e >= 1,2 s e <= 3 s.
+5. **R4:** o aviso de reconexao do `watch` e uma linha em stderr que **comeca com `aviso: reconectando`**; a linha do `watch` e a da v1.2 (inalterada).
+
