@@ -35,6 +35,7 @@ pub enum Failure {
     Run(String),
     BindForbidden(String),
     Unavailable(String),
+    PermissionDenied(String),
     /// Erro de uso sem a ajuda longa (saida 2): so a linha `chatd: <msg>`.
     Bad(String),
 }
@@ -149,6 +150,10 @@ fn main() {
         Err(Failure::Unavailable(m)) => {
             eprintln!("chatd: {m}");
             4
+        }
+        Err(Failure::PermissionDenied(m)) => {
+            eprintln!("chatd: {m}");
+            5
         }
     };
     std::process::exit(code);

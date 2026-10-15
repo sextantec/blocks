@@ -21,6 +21,12 @@ const RPC_DEADLINE: Duration = Duration::from_secs(30);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(5);
 const BIND_KEEPALIVE: Duration = Duration::from_secs(25);
+const DEFAULT_PROFILE_WARNING: &str =
+    "aviso: default_profile ignorado desde a v1.6; use --profile NOME";
+const INHERITED_JABBUR_WARNING: &str =
+    "aviso: identidade jabbur vem de CHATD_PROFILE herdado do ambiente";
+const IDENTITY_UNDEFINED: &str =
+    "identidade nao definida: informe --profile NOME ou CHATD_AS e CHATD_TOKEN_FILE";
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,14 +73,22 @@ fn client_opts(args: &[String], values: &[&str], bools: &[&str]) -> Result<Clien
     values.push("profile");
     let raw = parse_opts(args, &values, bools)?;
     let file = load_client_file()?;
+    if file.default_profile.is_some() {
+        eprintln!("{DEFAULT_PROFILE_WARNING}");
+    }
     let (profile, profile_source) = if let Some(name) = raw.get("profile") {
         (Some(name.to_string()), "flag")
     } else if let Some(name) = env_value("CHATD_PROFILE") {
         (Some(name), "env")
-    } else if let Some(name) = &file.default_profile {
-        (Some(name.clone()), "config")
     } else {
-        (None, "-")
+        (
+            None,
+            if file.default_profile.is_some() {
+                "ignored"
+            } else {
+                "unset"
+            },
+        )
     };
     if let Some(name) = &profile {
         if !valid_name(name) {
@@ -194,6 +208,13 @@ fn expand_home(value: &str) -> PathBuf {
 /// Erro de uma chamada: falha de transporte ou erro devolvido pelo servidor.
 pub enum Rpc {
     Io(String),
+    Connect {
+        kind: io::ErrorKind,
+        message: String,
+    },
+    ConnectDenied,
+    Unavailable(String),
+    NoResponse(String),
     Server {
         code: String,
         message: String,
@@ -208,6 +229,12 @@ fn rpc_fail(e: Rpc) -> Failure {
 
 fn rpc_failure(e: Rpc, for_bind: bool) -> Failure {
     match e {
+        Rpc::ConnectDenied => Failure::PermissionDenied(
+            "permissao negada ao socket: o ambiente do processo nao permite conectar (sandbox ou permissoes); nao e queda do daemon".into(),
+        ),
+        Rpc::Unavailable(m) | Rpc::NoResponse(m) => Failure::Unavailable(m),
+        Rpc::Connect { message, .. } if for_bind => Failure::Unavailable(message),
+        Rpc::Connect { message, .. } => Failure::Run(message),
         Rpc::Io(m) if for_bind => Failure::Unavailable(m),
         Rpc::Io(m) => Failure::Run(m),
         Rpc::Server { code, message } if for_bind && code == "forbidden" => {
@@ -230,8 +257,42 @@ pub struct Session {
 
 impl Session {
     fn connect(socket: &Path) -> Result<Session, Rpc> {
-        let stream = UnixStream::connect(socket)
-            .map_err(|e| Rpc::Io(format!("nao conectou em {}: {e}", socket.display())))?;
+        const RETRIES_MS: [u64; 3] = [100, 300, 900];
+        for attempt in 0..=RETRIES_MS.len() {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(RETRIES_MS[attempt - 1]));
+            }
+            match Self::connect_once(socket) {
+                Ok(session) => return Ok(session),
+                Err(Rpc::Connect {
+                    kind: io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused,
+                    message,
+                }) if attempt < RETRIES_MS.len() => {
+                    let _ = message;
+                }
+                Err(Rpc::Connect {
+                    kind: io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused,
+                    message,
+                }) => {
+                    return Err(Rpc::Unavailable(message));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the final connect attempt returns or exits")
+    }
+
+    fn connect_once(socket: &Path) -> Result<Session, Rpc> {
+        let stream = UnixStream::connect(socket).map_err(|e| {
+            if matches!(e.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) {
+                Rpc::ConnectDenied
+            } else {
+                Rpc::Connect {
+                    kind: e.kind(),
+                    message: format!("nao conectou em {}: {e}", socket.display()),
+                }
+            }
+        })?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         Ok(Session {
@@ -291,12 +352,14 @@ impl Session {
         let started = Instant::now();
         loop {
             if started.elapsed() > RPC_DEADLINE {
-                return Err(Rpc::Io("servidor nao respondeu a tempo".to_string()));
+                return Err(Rpc::NoResponse(
+                    "servidor nao respondeu a tempo".to_string(),
+                ));
             }
             let v = match self.next_value() {
                 Ok(Some(v)) => v,
                 Ok(None) => continue,
-                Err(e) => return Err(Rpc::Io(format!("falha ao ler resposta: {e}"))),
+                Err(e) => return Err(Rpc::NoResponse(format!("falha ao ler resposta: {e}"))),
             };
             if v.get("method").is_some() || v.get("id") != Some(&json!(id)) {
                 continue;
@@ -394,14 +457,17 @@ fn token(o: &ClientOpts) -> Result<Option<String>, Failure> {
 
 /// Abre a sessao; com token, faz o `auth` antes de qualquer metodo.
 fn open(o: &ClientOpts, name: Option<&str>) -> Result<Session, Failure> {
-    let socket = socket_path(o)?;
-    let tok = token(o)?;
     let who = auth_name(name);
+    if who.is_none() {
+        return Err(usage(IDENTITY_UNDEFINED));
+    }
+    let tok = token(o)?;
     let auth = match (&tok, who.as_deref()) {
         (Some(t), Some(n)) => Some((n, t.as_str())),
-        (Some(_), None) => return Err(usage("autenticar exige --as/--from ou CHATD_AS")),
         (None, _) => None,
+        (Some(_), None) => unreachable!("identity checked above"),
     };
+    let socket = socket_path(o)?;
     let mut s = Session::connect(&socket).map_err(rpc_fail)?;
     s.has_token = tok.is_some();
     if let Some((n, t)) = auth {
@@ -411,9 +477,13 @@ fn open(o: &ClientOpts, name: Option<&str>) -> Result<Session, Failure> {
     Ok(s)
 }
 
-fn need<'a>(name: &'a Option<String>, what: &str) -> Result<&'a str, Failure> {
-    name.as_deref()
-        .ok_or_else(|| usage(format!("{what} exige --as/--from ou CHATD_AS")))
+fn open_without_auth(o: &ClientOpts) -> Result<Session, Failure> {
+    let socket = socket_path(o)?;
+    Session::connect(&socket).map_err(rpc_fail)
+}
+
+fn need<'a>(name: &'a Option<String>, _what: &str) -> Result<&'a str, Failure> {
+    name.as_deref().ok_or_else(|| usage(IDENTITY_UNDEFINED))
 }
 
 /// Escapa caracteres de controle como `\xNN` (spec F.1): nenhum byte de controle chega ao terminal.
@@ -530,9 +600,15 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
         params.insert("keep_open".into(), json!(true));
     }
     let mut s = open(&o, Some(from_name.as_str()))?;
-    let r = s
-        .call("message.send", Value::Object(params))
-        .map_err(rpc_fail)?;
+    let r = match s.call("message.send", Value::Object(params)) {
+        Ok(result) => result,
+        Err(Rpc::NoResponse(message)) => {
+            return Err(Failure::Unavailable(format!(
+                "{message}; id da mensagem para reconciliar: {id}"
+            )));
+        }
+        Err(error) => return Err(rpc_fail(error)),
+    };
     if o.flag("json") {
         println!(
             "{}",
@@ -639,7 +715,10 @@ pub fn status(args: &[String]) -> Result<(), Failure> {
     vals.push("as");
     let o = client_opts(args, &vals, &["json"])?;
     let name = identity(&o, "as")?;
-    let mut s = open(&o, name.as_deref())?;
+    let mut s = match name.as_deref() {
+        Some(name) => open(&o, Some(name))?,
+        None => open_without_auth(&o)?,
+    };
     let r = s.call("status", json!({"v": 1})).map_err(rpc_fail)?;
     if o.flag("json") {
         println!("{r}");
@@ -754,6 +833,8 @@ struct WatchState {
     deadline: Option<Instant>,
     /// Espera da proxima tentativa com `--reconnect` (1, 2, 4, 8, 16, 30, 30...).
     backoff: u64,
+    /// Espera padrao v1.6, em milissegundos (200 ms ate 5 s).
+    quick_backoff_ms: u64,
     receipts: bool,
     seen: HashMap<String, String>,
 }
@@ -767,7 +848,10 @@ enum WatchErr {
 
 fn classify(e: Rpc) -> WatchErr {
     match e {
-        Rpc::Io(_) => WatchErr::Retry,
+        Rpc::Io(_) | Rpc::Connect { .. } | Rpc::Unavailable(_) | Rpc::NoResponse(_) => {
+            WatchErr::Retry
+        }
+        Rpc::ConnectDenied => WatchErr::Fatal(rpc_fail(Rpc::ConnectDenied)),
         e => WatchErr::Fatal(rpc_fail(e)),
     }
 }
@@ -897,6 +981,7 @@ pub fn watch(args: &[String]) -> Result<(), Failure> {
         heartbeat: o.get("heartbeat-file").map(PathBuf::from),
         deadline,
         backoff: 1,
+        quick_backoff_ms: 200,
         receipts: o.flag("receipts"),
         seen: HashMap::new(),
     };
@@ -915,16 +1000,18 @@ pub fn watch(args: &[String]) -> Result<(), Failure> {
             Ok(()) => return Ok(()),
             Err(WatchErr::Fatal(f)) => return Err(f),
             Err(WatchErr::Retry) => {
-                // Com --reconnect: espera crescente e aviso em stderr. Sem ele: 1 s fixo (v1.1).
                 let wait = if reconnect {
                     let w = st.backoff;
                     eprintln!("chatd: reconectando em {w}s");
                     st.backoff = if w >= 16 { 30 } else { w * 2 };
-                    w
+                    Duration::from_secs(w)
                 } else {
-                    1
+                    let ms = st.quick_backoff_ms;
+                    eprintln!("aviso: reconectando em {ms}ms");
+                    st.quick_backoff_ms = (ms * 2).min(5000);
+                    Duration::from_millis(ms)
                 };
-                if sleep_or_stop(Duration::from_secs(wait), &stop, st.deadline) {
+                if sleep_or_stop(wait, &stop, st.deadline) {
                     return Ok(());
                 }
             }
@@ -948,7 +1035,7 @@ fn watch_once(
     st: &mut WatchState,
     stop: &AtomicBool,
 ) -> Result<(), WatchErr> {
-    let mut s = Session::connect(socket).map_err(|_| WatchErr::Retry)?;
+    let mut s = Session::connect_once(socket).map_err(classify)?;
     if let Some(t) = tok {
         s.has_token = true;
         s.call("auth", json!({"v": 1, "name": name, "token": t}))
@@ -983,6 +1070,7 @@ fn watch_once(
     .map_err(classify)?;
     // Conectado e autenticado: zera a espera de --reconnect e registra o heartbeat (v1.2 C).
     st.backoff = 1;
+    st.quick_backoff_ms = 200;
     let mut last_hb = Instant::now();
     write_heartbeat(st)?;
     let mut last_ka = Instant::now();
@@ -1158,24 +1246,36 @@ pub fn whoami(args: &[String]) -> Result<(), Failure> {
         (None, "-")
     };
     let has_socket = socket.is_some();
+    let profile_origin = || {
+        o.profile
+            .as_deref()
+            .map(|name| format!("profile:{name}"))
+            .unwrap_or_else(|| "unset".to_string())
+    };
     let (token_file, token_source) = if let Some(value) = o.get("token-file") {
-        (Some(expand_home(value)), "flag")
+        (Some(expand_home(value)), "flag".to_string())
     } else if let Some(value) = env_value("CHATD_TOKEN_FILE") {
-        (Some(expand_home(&value)), "env")
+        (Some(expand_home(&value)), "env".to_string())
     } else if let Some(profile) = o.profile() {
-        (Some(expand_home(&profile.token_file)), "config")
+        (Some(expand_home(&profile.token_file)), profile_origin())
     } else {
-        (None, "-")
+        (None, "unset".to_string())
     };
     let as_source = if o.get("as").is_some() {
-        "flag"
+        "flag".to_string()
     } else if env_value("CHATD_AS").is_some() {
-        "env"
+        "env".to_string()
     } else if o.profile().is_some() {
-        "config"
+        profile_origin()
     } else {
-        "-"
+        "unset".to_string()
     };
+    if o.profile_source == "env"
+        && o.get("profile").is_none()
+        && (o.profile.as_deref() == Some("jabbur") || identity.as_deref() == Some("jabbur"))
+    {
+        eprintln!("{INHERITED_JABBUR_WARNING}");
+    }
     let field = |value: Option<String>| value.map(Value::String).unwrap_or(Value::Null);
     let output = json!({
         "as": field(identity),
