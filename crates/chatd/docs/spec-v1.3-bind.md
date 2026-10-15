@@ -17,6 +17,8 @@ Hoje `config.json` fixa `"pane": "w3:p1"`. Se o painel muda (aba nova, outro mul
 6. **Uma ligacao por nome**: nova ligacao do mesmo nome substitui a anterior (`unbound replaced`).
 7. **Campainha** so digita em painel ligado e verificado **nesta** vida da ligacao; nunca em id vindo so de arquivo de configuracao quando `delivery: auto`.
 
+8. **Binarios configuraveis** (para teste e instalacao): `config.json` aceita `tmux_bin` (padrao `"tmux"`) ao lado de `herdr_bin`; o daemon chama sempre por esses caminhos. Campo desconhecido continua recusado.
+
 ## CLI
 `chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]`
 - `--pane` padrao: variavel de ambiente do multiplexador (`TMUX_PANE` no tmux; no herdr, a que o implementador provar que existe).
