@@ -172,7 +172,11 @@ impl Diario {
     }
 
     fn resultado(&mut self, id: &str, ts: &str) -> &mut Self {
-        self.evento("resulted", ts, json!({"id": id, "note": null, "result": "ok"}))
+        self.evento(
+            "resulted",
+            ts,
+            json!({"id": id, "note": null, "result": "ok"}),
+        )
     }
 
     fn campainha(&mut self, dest: &str, ts: &str) -> &mut Self {
@@ -299,7 +303,10 @@ fn s1_sem_pendencia_sai_0_e_nao_escreve_linha() {
     d.resultado("s1-2", &ha_min(19));
     let r = stale(&a, &st, &[]);
     assert_eq!(r.code, Some(0), "sem pendencia = saida 0: {r:?}");
-    assert!(r.stdout.trim().is_empty(), "sem pendencia nao ha linha: {r:?}");
+    assert!(
+        r.stdout.trim().is_empty(),
+        "sem pendencia nao ha linha: {r:?}"
+    );
 }
 
 #[test]
@@ -339,7 +346,10 @@ fn s2b_pendente_de_16_min_sai_6_com_linha_nome_n_m_k() {
     assert_eq!(p.nome, C, "{p:?}");
     assert_eq!(p.pendentes, 1, "{p:?}");
     // AMBIGUO: M em minutos inteiros, arredondado ou truncado; 16 min reais aceitam 15 a 17.
-    assert!((15..=17).contains(&p.mais_antiga_min), "M fora de 15..=17: {p:?}");
+    assert!(
+        (15..=17).contains(&p.mais_antiga_min),
+        "M fora de 15..=17: {p:?}"
+    );
     assert_eq!(p.campainha, 0, "{p:?}");
 }
 
@@ -373,7 +383,11 @@ fn s3_duas_campainhas_sem_aceite_com_pendente_recente_sai_6() {
     d.campainha(C, &ha_seg(90));
     d.campainha(C, &ha_seg(60));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(6), "2 campainhas sem aceite (padrao 2) = parado: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(6),
+        "2 campainhas sem aceite (padrao 2) = parado: {r:?}"
+    );
     let ls = paradas(&r.stdout);
     assert_eq!(ls.len(), 1, "{r:?}");
     let p = le_parado(&ls[0]);
@@ -417,7 +431,11 @@ fn s3d_campainhas_antes_do_registro_nao_contam() {
     d.campainha(C, &ha_min(9));
     d.registro("s3-4", A, C, "assunto", "corpo", &ha_min(2));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(0), "campainhas anteriores ao registro nao contam: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "campainhas anteriores ao registro nao contam: {r:?}"
+    );
     assert!(paradas(&r.stdout).is_empty(), "{r:?}");
 }
 
@@ -431,7 +449,11 @@ fn s3e_campainha_de_outro_destinatario_nao_conta_para_c() {
     d.campainha(A, &ha_seg(90));
     d.campainha(A, &ha_seg(60));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(0), "campainha de outro destinatario nao conta: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "campainha de outro destinatario nao conta: {r:?}"
+    );
     assert!(paradas(&r.stdout).is_empty(), "{r:?}");
 }
 
@@ -471,7 +493,11 @@ fn s4c_campainhas_seguidas_de_aceite_nao_deixam_parado() {
     d.campainha(C, &ha_min(9));
     d.aceite("s4-3", &ha_min(5));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(0), "aceite depois das campainhas encerra o episodio: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "aceite depois das campainhas encerra o episodio: {r:?}"
+    );
     assert!(paradas(&r.stdout).is_empty(), "{r:?}");
 }
 
@@ -520,7 +546,10 @@ fn s5b_dois_destinatarios_parados_geram_duas_linhas() {
     let ls = paradas(&r.stdout);
     assert_eq!(ls.len(), 2, "uma linha por destinatario parado: {r:?}");
     let nomes: Vec<String> = ls.iter().map(|l| le_parado(l).nome).collect();
-    assert!(nomes.contains(&C.to_string()) && nomes.contains(&A.to_string()), "{nomes:?}");
+    assert!(
+        nomes.contains(&C.to_string()) && nomes.contains(&A.to_string()),
+        "{nomes:?}"
+    );
 }
 
 // ---------- S6: assunto e corpo nunca saem (stdout, stderr, stamp-file, --json, sink de arquivo) ----------
@@ -533,16 +562,31 @@ fn s6_assunto_e_corpo_nunca_aparecem_em_stdout_stderr_nem_stamp() {
     d.registro("s6-1", A, C, MARCA_ASSUNTO, MARCA_CORPO, &ha_min(16));
     // Sanidade: as marcas estao no log; sem isso a ausencia na saida nao provaria nada.
     let log = fs::read_to_string(a.state().join("log.jsonl")).unwrap();
-    assert!(log.contains(MARCA_ASSUNTO) && log.contains(MARCA_CORPO), "marcas fora do log");
+    assert!(
+        log.contains(MARCA_ASSUNTO) && log.contains(MARCA_CORPO),
+        "marcas fora do log"
+    );
     let stamp = a.stamp();
     let sp = s(&stamp).to_string();
     let r = stale(&a, &st, &["--stamp-file", sp.as_str()]);
     assert_eq!(r.code, Some(6), "a mensagem esta parada: {r:?}");
-    assert!(!paradas(&r.stdout).is_empty(), "a execucao precisa ter produzido a linha: {r:?}");
+    assert!(
+        !paradas(&r.stdout).is_empty(),
+        "a execucao precisa ter produzido a linha: {r:?}"
+    );
     let sf = fs::read_to_string(&stamp).expect("o stamp-file deve ser criado pelo verificador");
-    assert!(!r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO), "vazou em stdout: {r:?}");
-    assert!(!r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO), "vazou em stderr: {r:?}");
-    assert!(!sf.contains(MARCA_ASSUNTO) && !sf.contains(MARCA_CORPO), "vazou no stamp-file: {sf}");
+    assert!(
+        !r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO),
+        "vazou em stdout: {r:?}"
+    );
+    assert!(
+        !r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO),
+        "vazou em stderr: {r:?}"
+    );
+    assert!(
+        !sf.contains(MARCA_ASSUNTO) && !sf.contains(MARCA_CORPO),
+        "vazou no stamp-file: {sf}"
+    );
 }
 
 #[test]
@@ -553,8 +597,14 @@ fn s6b_assunto_e_corpo_nao_aparecem_com_json() {
     d.registro("s6-2", A, C, MARCA_ASSUNTO, MARCA_CORPO, &ha_min(16));
     let r = stale(&a, &st, &["--json"]);
     assert_eq!(r.code, Some(6), "{r:?}");
-    assert!(!r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO), "vazou com --json: {r:?}");
-    assert!(!r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO), "{r:?}");
+    assert!(
+        !r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO),
+        "vazou com --json: {r:?}"
+    );
+    assert!(
+        !r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO),
+        "{r:?}"
+    );
 }
 
 #[test]
@@ -568,8 +618,14 @@ fn s6c_assunto_e_corpo_nao_aparecem_no_sink_de_arquivo() {
     let r = stale(&a, &st, &["--notify", notify.as_str()]);
     assert_eq!(r.code, Some(6), "{r:?}");
     let conteudo = fs::read_to_string(&alertas).expect("o sink file deve receber a linha");
-    assert!(!conteudo.trim().is_empty(), "linha de alerta ausente no arquivo");
-    assert!(!conteudo.contains(MARCA_ASSUNTO) && !conteudo.contains(MARCA_CORPO), "vazou no arquivo: {conteudo}");
+    assert!(
+        !conteudo.trim().is_empty(),
+        "linha de alerta ausente no arquivo"
+    );
+    assert!(
+        !conteudo.contains(MARCA_ASSUNTO) && !conteudo.contains(MARCA_CORPO),
+        "vazou no arquivo: {conteudo}"
+    );
 }
 
 // ---------- S7: um aviso por episodio; episodio novo avisa de novo ----------
@@ -593,7 +649,10 @@ fn s7_mesmo_episodio_nao_repete_e_episodio_novo_avisa() {
     // AMBIGUO: o codigo desta execucao deduplicada nao e fixado (0 ou 6); o que se exige e nao repetir.
     let r2 = stale(&a, &st, &extra);
     assert!(matches!(r2.code, Some(0) | Some(6)), "{r2:?}");
-    assert!(paradas(&r2.stdout).is_empty(), "o mesmo episodio nao pode repetir o aviso: {r2:?}");
+    assert!(
+        paradas(&r2.stdout).is_empty(),
+        "o mesmo episodio nao pode repetir o aviso: {r2:?}"
+    );
 
     // Fim do episodio: a mensagem e aceita e nada mais fica pendente.
     d.aceite("s7-1", &ha_min(30));
@@ -620,9 +679,16 @@ fn s8_linha_corrompida_conta_em_skipped_e_o_resto_e_avaliado() {
     let r = stale(&a, &st, &[]);
     assert_eq!(r.code, Some(6), "a linha valida continua valendo: {r:?}");
     assert_eq!(paradas(&r.stdout).len(), 1, "{r:?}");
-    assert!(r.stderr.contains("skipped"), "contagem skipped ausente em stderr: {r:?}");
+    assert!(
+        r.stderr.contains("skipped"),
+        "contagem skipped ausente em stderr: {r:?}"
+    );
     // AMBIGUO: o contrato so diz `skipped` em stderr; o numero e lido logo apos o rotulo.
-    assert_eq!(numero_apos(&r.stderr, "skipped"), Some(1), "skipped deve ser 1: {r:?}");
+    assert_eq!(
+        numero_apos(&r.stderr, "skipped"),
+        Some(1),
+        "skipped deve ser 1: {r:?}"
+    );
 }
 
 #[test]
@@ -641,7 +707,10 @@ fn s8b_campo_desconhecido_no_log_e_ignorado() {
     } else {
         0
     };
-    assert_eq!(skipped, 0, "campo desconhecido nao conta como linha invalida: {r:?}");
+    assert_eq!(
+        skipped, 0,
+        "campo desconhecido nao conta como linha invalida: {r:?}"
+    );
 }
 
 #[test]
@@ -656,8 +725,14 @@ fn s8c_conteudo_de_linha_corrompida_nao_ecoa() {
     ));
     let r = stale(&a, &st, &[]);
     assert_eq!(r.code, Some(6), "{r:?}");
-    assert!(!r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO), "{r:?}");
-    assert!(!r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO), "{r:?}");
+    assert!(
+        !r.stdout.contains(MARCA_ASSUNTO) && !r.stdout.contains(MARCA_CORPO),
+        "{r:?}"
+    );
+    assert!(
+        !r.stderr.contains(MARCA_ASSUNTO) && !r.stderr.contains(MARCA_CORPO),
+        "{r:?}"
+    );
 }
 
 // ---------- S9: sink tmux e reservado: saida 2, sem executar nada ----------
@@ -679,7 +754,11 @@ fn s9_notify_tmux_sai_2_e_nao_executa_tmux() {
     let st_s = s(&st).to_string();
     // Controle: sem o sink tmux o mesmo estado e verificado com saida 6. Sem isso, saida 2 poderia ser so erro de uso.
     let ctl = roda(&a, &["stale", "--state-dir", st_s.as_str()], &[]);
-    assert_eq!(ctl.code, Some(6), "controle sem --notify tmux deve dar 6: {ctl:?}");
+    assert_eq!(
+        ctl.code,
+        Some(6),
+        "controle sem --notify tmux deve dar 6: {ctl:?}"
+    );
     let r = roda(
         &a,
         &["stale", "--state-dir", st_s.as_str(), "--notify", "tmux"],
@@ -697,7 +776,11 @@ fn s9b_sink_fora_da_lista_sai_2() {
     let mut d = Diario::novo(&st);
     d.registro("s9-2", A, C, "assunto", "corpo", &ha_min(16));
     let ctl = stale(&a, &st, &[]);
-    assert_eq!(ctl.code, Some(6), "controle sem --notify deve dar 6: {ctl:?}");
+    assert_eq!(
+        ctl.code,
+        Some(6),
+        "controle sem --notify deve dar 6: {ctl:?}"
+    );
     let r = stale(&a, &st, &["--notify", "exec:/bin/true"]);
     assert_eq!(r.code, Some(2), "sink fora da lista = saida 2: {r:?}");
 }
