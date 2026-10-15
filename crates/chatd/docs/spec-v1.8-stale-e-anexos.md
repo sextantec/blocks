@@ -27,6 +27,12 @@ O `codex-blocks` perde a rede da sandbox as 15:40 e a campainha toca de 10 em 10
 ### Contrato testavel (Parte A)
 **S1 a S12** e **S7j** de `tests/v17_stale.rs` e da spec v1.7, mais: **S13** PEDIDO aceito ha 59 min sem resultado: nada; ha 61 min: saida 6 e a linha `sem resultado`. **S14** AVISO e RESPOSTA aceitos ha 3 h sem resultado: nada. **S15** PERGUNTA conta como PEDIDO. **S16** `resulted` apos o aviso encerra o episodio; uma segunda mensagem nova no mesmo destinatario reavisa. **S17** os dois tipos no mesmo destinatario geram duas linhas distintas, sem se deduplicarem entre si. **S18** `--result-older-than` invalido (0, negativo, nao numerico) e saida 2.
 
+### Esclarecimentos da Parte A (testes independentes S13 a S22, 2026-10-15)
+1. **Idade do "sem resultado"** conta a partir do `accepted` da mensagem (o trabalho comeca no aceite), nao do `registered`.
+2. **`M` (minutos)** e a parte inteira de `idade/60`, arredondada para baixo; os testes aceitam +-1 (S13b: 60 a 62 para 61 min).
+3. **`--json`:** **uma linha por objeto** (JSON Lines, como `chatd log` e `watch`), nao um array. Campos de cada objeto: `name`, `type` (`unaccepted` ou `no_result`), `count`, `oldest_min`, `bells` (so em `unaccepted`) e `new_alert`.
+4. **`skipped`** e impresso em stderr como `skipped=N` quando N > 0.
+
 ---
 # Parte B: anexos (arquivos) com validade
 
