@@ -1,0 +1,22 @@
+# Unit de usuario do `chatd stale` (oneshot, disparada por chatd-stale.timer). Revise antes de instalar.
+# O `chatd stale` e cliente puro: le o log.jsonl, nao conecta ao daemon, nao usa token, nao chama modelo
+# (custo zero em tokens) e nunca digita em painel. Sai 6 quando ha aviso NOVO: isso e sucesso aqui.
+[Unit]
+Description=chatd stale: avisa mensagens aceitas ou registradas e paradas
+After=chatd.service
+
+[Service]
+Type=oneshot
+Environment=CHATD_HOME=%h/.local/state/chatd
+ExecStart=%h/.local/bin/chatd stale --state-dir ${CHATD_HOME}/state --notify file:${CHATD_HOME}/alerts.log --stamp-file ${CHATD_HOME}/stale.stamp
+# 0 = nada novo; 6 = aviso novo gravado (nao e falha).
+SuccessExitStatus=6
+# Endurecimento: so le o estado do chatd e anexa em alerts.log/stale.stamp. Sem rede.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/chatd
+UMask=0077
+TimeoutStartSec=30

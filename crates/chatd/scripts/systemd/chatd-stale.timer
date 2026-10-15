@@ -1,0 +1,12 @@
+# Timer do `chatd stale`: a cada 5 minutos (T = 15 min para "sem aceite" e 60 min para "sem resultado",
+# padroes do contrato; o atraso do alerta e de ate T + 5 min). Instalar com instala-unit.sh ou a mao.
+[Unit]
+Description=chatd stale a cada 5 minutos
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
