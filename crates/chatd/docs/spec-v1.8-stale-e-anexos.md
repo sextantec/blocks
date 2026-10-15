@@ -38,13 +38,13 @@ O `codex-blocks` perde a rede da sandbox as 15:40 e a campainha toca de 10 em 10
 ---
 # Parte B: anexos (arquivos) com validade (rev2: incorpora as revisoes de seguranca do Opus e do Sol 6.1, 2026-10-15)
 
-> **Estado:** rascunho **rev2**. Duas decisoes do Jabbur continuam abertas e esta rev2 assume a recomendacao em ambas (marcadas **[CONFIRMAR]**): (1) ~~sem deduplicacao entre envios~~ **CONFIRMADO pelo Jabbur ("Pendencia 1 de 3: A", 2026-10-15 noite)**; (2) anexos **desligados por destinatario** ate o Jabbur liberar (opt-in). Se ele decidir o contrario, reverte-se so esses dois pontos.
+> **Estado:** rascunho **rev2**. Decidido pelo Jabbur: **sem deduplicacao** (A18) e **sem opt-in por destinatario** (A20: um agente que alcanca o socket do `chatd` ja alcanca a rede; ver a Ameaca).
 
 ### Problema (exemplo)
 Agentes em sandboxes diferentes **nao enxergam os arquivos uns dos outros**; o unico canal que todos alcancam e o socket do `chatd`. Hoje: o Codex da Web nao le a bancada (grava-se a interface em `docs/agentes/` dentro do repositorio dele); o `codex-blocks` nao leu o repositorio do `agentd`; o brief do Sol precisa ser inline (teto de 64 KB); o corpo da mensagem tem teto de 16 KiB.
 
 ### Ameaca declarada (leia antes de implementar)
-1. **Os anexos ampliam em ~500 vezes (8 MiB contra 16 KiB) o que um agente induzido por texto malicioso pode tirar da maquina** pelo correio, em especial para um destinatario com rede (o Codex da Web). **Nao ha prevencao de vazamento de segredos nesta versao**: a denylist por nome e a varredura de padroes sao protecao **acidental e best-effort**, contornaveis (renomear, falar direto no socket). A contencao real e o opt-in por destinatario e a autorizacao do dono.
+1. **Os anexos ampliam em ~500 vezes (8 MiB contra 16 KiB) o que um agente induzido por texto malicioso pode tirar da maquina** pelo correio, em especial para um destinatario com rede (o Codex da Web). **Nao ha prevencao de vazamento de segredos nesta versao**: a denylist por nome e a varredura de padroes sao protecao **acidental e best-effort**, contornaveis (renomear, falar direto no socket). **Decisao do Jabbur (A20): sem opt-in por destinatario.** O argumento: um agente malicioso que ja esta no sistema e tem rede pode mandar o que quiser para fora sem o `chatd`; e, na topologia atual, quem perde a rede na sandbox perde tambem o acesso ao socket (observado: `EPERM`). O anexo **nao cria** capacidade de saida que o agente ainda nao tenha; o risco que fica e o **acidente** (anexar o que nao devia) e a **amplificacao** de um agente que nao le arquivos sensiveis mas e induzido por um que le, ambos tratados pela denylist e pela varredura best-effort.
 2. **Mesmo usuario do sistema:** o diretorio 0700 nao protege contra outro processo do mesmo uid; o controle e a identidade por token do protocolo.
 3. **Disponibilidade:** o correio e um daemon de **trava unica** (`Mutex<Store>`, `sync_data` por evento, log que so cresce). Anexo nenhum pode atrasar `message.send` de ninguem nem encher o disco do log.
 
@@ -59,13 +59,12 @@ Decisao: "o status deve dizer somente se o daemon esta funcionando e estatistica
 ### Modelo
 - **Blob = um envio.** Cada `put` cria um blob **independente**, com id opaco `blob:<32 hex aleatorios>` (128 bits de `getrandom`). **Sem deduplicacao** entre envios (nem entre donos, nem do mesmo dono; **decidido pelo Jabbur**, A18): o hash SHA-256 e **metadado de integridade**, nunca um identificador de autorizacao. Motivos (Opus S2 e Sol S01 a S03): a deduplicacao cria oraculo de existencia, ambiguidade de vinculo/TTL e corridas; 256 MiB nao pedem dedup.
 - **Dono** = identidade que enviou; **destinatario** = exatamente um nome declarado no envio. Ninguem mais le. **Para ausente, vencido ou nao autorizado a resposta e a mesma: `not_found`** (sem `forbidden`, sem campos extras), para nao revelar existencia.
-- **Opt-in por destinatario [CONFIRMAR]:** `config.json` `recipients.NOME.blobs: true` (padrao `false`). Envio para quem nao liberou: `blobs_disabled`. O dono liga caso a caso.
 - **Validade obrigatoria:** `expires_at` = `created_at` + `ttl_s`. Padrao `blob_default_ttl_s` 86400 (24 h), maximo `blob_max_ttl_s` 604800 (7 dias), **minimo 60 s** (decisao do Jabbur: 24 h e 7 dias). Prazo calculado no relogio **monotonico** do processo; persistem `created_at` e `ttl_s`; na partida vale `min(parede, created_at + blob_max_ttl_s)`.
 - **Armazenamento:** `D/blobs/<aa>/<id>` (0600; diretorios 0700; `aa` = 2 primeiros hex), temporarios em `D/blobs/tmp-<rand>` criados com `O_EXCL`. O nome no disco e **sempre o id**; `name` do cliente (`[A-Za-z0-9._-]{1,64}`, validado no servidor) e metadado e **vai ao `log.jsonl`** (0600, como o assunto). O conteudo **nunca** entra no log, em `watch`, `status` nem em erros.
 - **Visibilidade dos eventos:** `blob_put`, `blob_got`, `blob_removed`, `blob_expired` so sao vistos por dono e destinatario daquele blob (`visible()` filtra por vinculo); `status` nao os expoe.
 
 ### Protocolo (metodos novos; `v: 1` inalterado; exigem autenticacao)
-- **`blob.put.begin`** `{v, size, name?, to:N, ttl_s?}` -> `{v, upload_id, chunk_max}`. Reserva **atomicamente** bytes e contagem na cota (incluindo sessoes em andamento). Erros: `too_large`, `quota_exceeded`, `unknown_recipient`, `blobs_disabled`, `rate_limited`, `disk_full`, `invalid_envelope` (`ttl_s` fora de 60..max).
+- **`blob.put.begin`** `{v, size, name?, to:N, ttl_s?}` -> `{v, upload_id, chunk_max}`. Reserva **atomicamente** bytes e contagem na cota (incluindo sessoes em andamento). Erros: `too_large`, `quota_exceeded`, `unknown_recipient`, `rate_limited`, `disk_full`, `invalid_envelope` (`ttl_s` fora de 60..max).
 - **`blob.put.chunk`** `{v, upload_id, n, data}`: `n` consecutivo a partir de 0; `data` base64 de ate **512 KiB** brutos; o decodificado vai **direto a um temporario em disco** (nunca acumula em memoria); `recebido <= size` a cada pedaco; repetir ou saltar `n` aborta a sessao.
 - **`blob.put.end`** `{v, upload_id, sha256}` -> `{v, blob, size, expires_at}`. O daemon calcula o SHA-256 **incrementalmente** (por pedaco, fora da trava), compara tamanho e hash; divergencia aborta e limpa. Pedaco vazio so para arquivo de 0 byte (sem pedacos).
 - **`blob.get`** `{v, blob, offset?, length?}` -> `{v, size, offset, data}` com `length` <= 512 KiB (validado); le sempre do **mesmo descritor** aberto.
@@ -81,7 +80,7 @@ Criar: temporario `O_EXCL` 0600 -> `fsync` -> `rename` para `blobs/<aa>/<id>` ->
 3. **Cotas (recusa, nunca despejo):** `blob_max_bytes` 8 MiB; por dono 64 MiB e 32 blobs; total 256 MiB; **contagem logica** (cada envio e cobrado inteiro). Espaco livre minimo = tamanho + **reserva fixa de 512 MiB** para o log. Limite de taxa: 30 `put.begin`/min por identidade; vencimento nao devolve cota instantaneamente para burlar a taxa.
 
 ### Cliente (CLI)
-`chatd put FILE --to N [--name N] [--ttl DUR] [--json]` | `chatd get BLOB [--out PATH|-] [--consume]` | `chatd rm BLOB` | `chatd ls`. **`chatd send --attach FILE`** (**um** anexo por mensagem nesta versao): valida o destinatario e o opt-in **antes** do `put`, depois envia; falha entre os dois passos remove o blob recem-criado (compensacao). `get` baixa **tudo**, confere o SHA-256 contra o `put`, grava em temporario `0600` no destino e so entao `rename` (sem sobrescrever); `--out -` usa buffer de ate 8 MiB e confere antes de escrever; links simbolicos na entrada e na saida sao recusados. **Denylist por nome real** (`.env`, `.credentials.json`, `*.token`, `auth.json`, `config.toml`, `.netrc`, `*.pem`, `*.p12`, `*.key`, `id_*`) e **varredura best-effort no servidor** (cabecalho PEM, `-----BEGIN`, `sk-`, `ghp_`, `refresh_token`) com recusa `secret_suspected`; **nao sao prevencao** (ver Ameaca). Identidade explicita como na v1.6.
+`chatd put FILE --to N [--name N] [--ttl DUR] [--json]` | `chatd get BLOB [--out PATH|-] [--consume]` | `chatd rm BLOB` | `chatd ls`. **`chatd send --attach FILE`** (**um** anexo por mensagem nesta versao): valida o destinatario **antes** do `put`, depois envia; falha entre os dois passos remove o blob recem-criado (compensacao). `get` baixa **tudo**, confere o SHA-256 contra o `put`, grava em temporario `0600` no destino e so entao `rename` (sem sobrescrever); `--out -` usa buffer de ate 8 MiB e confere antes de escrever; links simbolicos na entrada e na saida sao recusados. **Denylist por nome real** (`.env`, `.credentials.json`, `*.token`, `auth.json`, `config.toml`, `.netrc`, `*.pem`, `*.p12`, `*.key`, `id_*`) e **varredura best-effort no servidor** (cabecalho PEM, `-----BEGIN`, `sk-`, `ghp_`, `refresh_token`) com recusa `secret_suspected`; **nao sao prevencao** (ver Ameaca). Identidade explicita como na v1.6.
 
 ### Seguranca, compatibilidade e limites declarados
 `blob.*` **exige autenticacao**: com `auth: off`, responde `unauthenticated` e o daemon recusa ligar anexos. **Volta de versao:** o daemon anterior recusa subir com eventos `blob_*` no log ("tipo de evento desconhecido"); depois do primeiro anexo, voltar exige restaurar o backup do estado. Conteudo nunca executado; nenhum nome do cliente vira caminho; o daemon nunca le arquivo por caminho enviado pelo cliente (so bytes).
@@ -93,11 +92,11 @@ Criar: temporario `O_EXCL` 0600 -> `fsync` -> `rename` para `blobs/<aa>/<id>` ->
 - **B6** direto: destinatario `rm` apaga; `get --consume` baixa, confere e remove; `resulted` **nao** remove.
 - **B7** nao ha dedup: o mesmo conteudo enviado duas vezes gera dois blobs e dois arquivos; `rm` de um nao afeta o outro; cota cobra os dois.
 - **B8** cotas: por arquivo, dono (bytes e contagem), total; recusa sem despejo; reserva no `begin` conta uploads em andamento (4 sessoes concorrentes nao excedem); espaco livre abaixo da reserva => `disk_full`.
-- **B9** opt-in: destinatario sem `blobs: true` => `blobs_disabled`; `send --attach` valida antes de subir.
+- **B9** envio a destinatario desconhecido: `unknown_recipient` e nada sobe; `send --attach` valida antes do `put`.
 - **B10** reinicio: indice reconstruido; vinculo sem arquivo => `blob_removed reason=missing`; orfaos e `tmp-*` apagados; recusa subir com `blobs/` link simbolico ou com permissao errada.
 - **B11** upload: `upload_id` de outra identidade/conexao => `not_found`; prazo absoluto de 10 min; ociosidade 120 s; 2o upload simultaneo da identidade recusado; `n` fora de ordem.
 - **B12** privacidade: sentinela no **conteudo** nao aparece no log, `watch`, `status`, erros nem stderr; `name` aparece so no `blob_put` do log (0600) e em `ls` do dono/destinatario.
-- **B13** `send --attach`: um anexo; cria o ref `blob`; falha apos o `put` remove o blob; destinatario sem opt-in nao sobe nada.
+- **B13** `send --attach`: um anexo; cria o ref `blob`; falha apos o `put` remove o blob; destinatario desconhecido nao sobe nada.
 - **B14** `get --out -`/`--out` em diretorio sem permissao ou sobre link: erro limpo (saida 5 se permissao), sem arquivo parcial e sem `--consume` aplicado.
 - **B15** compatibilidade: suites v1.1 a v1.7 e a auditoria F verdes; `blob.*` em daemon antigo => `method_not_found` com mensagem clara; **daemon antigo com eventos `blob_*` no log recusa subir** (documentado).
 - **B16 a B19** (B.0): `status` com auth ligada e sem token so estatisticas; nenhum nome aparece; `mailbox.counts` so da propria identidade e ignora seletores (`to`) e troca de identidade; `inbox --count`.
@@ -111,7 +110,7 @@ Criar: temporario `O_EXCL` 0600 -> `fsync` -> `rename` para `blobs/<aa>/<id>` ->
 
 ## Perguntas abertas (decisao do Jabbur)
 1. ~~Validade~~ **Decidido (A13):** 24 h padrao, 7 dias maximo. 2. ~~Tamanhos~~ **Decidido (A14):** 8 MiB, 256 MiB. 3. ~~Remocao automatica ao `resultado`~~ **Decidido (A15): nao.** 4. ~~Broadcast~~ **Decidido (A16): nao.**
-5. ~~Sem deduplicacao entre envios~~ **Decidido (A18): sem dedup.** 6. **[CONFIRMAR] Opt-in por destinatario** (padrao desligado; o Jabbur liga um a um).
+5. ~~Sem deduplicacao entre envios~~ **Decidido (A18): sem dedup.** 6. ~~Opt-in por destinatario~~ **Decidido (A20): nao**, pelo argumento do Jabbur (a capacidade de saida ja existe para quem alcanca o socket).
 
 ---
 # Parte C: obrigacoes explicitas (recibo `bloqueado`, `due`, `obligations`) (RASCUNHO; decisao do Jabbur "Pendencia 1: A", 2026-10-15 noite)
