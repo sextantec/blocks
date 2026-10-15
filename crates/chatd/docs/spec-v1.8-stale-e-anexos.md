@@ -69,7 +69,7 @@ Linha de 1 MiB: o envio e em pedacos de ate **512 KiB** brutos (~700 KiB em base
 
 ### Regras de limpeza (quem remove, e o que garante que nao enche)
 1. **Validade:** coleta na partida e a cada 60 s (`blob_gc_s`); vencido => arquivo apagado, evento `blob_expired`, `blob.get` => `not_found`.
-2. **Direto (decisao do Jabbur):** o agente que **recebeu** remove o arquivo depois de usar (`chatd get --consume BLOB` baixa e remove; ou `chatd rm`). **Rede de seguranca do daemon:** quando uma mensagem `direct` que referencia o blob chega a `resulted`, o daemon remove o blob automaticamente (a limpeza nao depende da disciplina do agente); a validade e o ultimo recurso.
+2. **Direto (decisao do Jabbur):** o agente que **recebeu** remove o arquivo depois de usar (`chatd get --consume BLOB` baixa e remove; ou `chatd rm`). **Nao ha remocao automatica quando a mensagem chega a `resultado`** (decisao do Jabbur, 2026-10-15 noite, "B": o agente pode reler o anexo depois de fechar o recibo). O que garante que nao enche e a **validade** (24 h) e as cotas; `chatd ls` mostra, por blob, `expires_in` e se ja foi lido, para o agente e o dono verem o que ficou.
 3. **Multi/broadcast:** cada destinatario libera (`chatd release BLOB`); sai quando todos liberaram, o dono removeu ou venceu. Recebedor nao remove sozinho (outros ainda precisam).
 4. **Cotas (recusa, nunca despejo):** `blob_max_bytes` 8 MiB por arquivo; `blob_owner_max_bytes` 64 MiB e `blob_owner_max_count` 32 por dono; `blob_total_max_bytes` 256 MiB no total; espaco livre abaixo de 2x o arquivo => `disk_full`. Quota cheia gera `quota_exceeded` com a conta, sem apagar nada de ninguem.
 
@@ -84,7 +84,7 @@ Mesmo usuario do sistema: o diretorio 0700 nao protege contra outro processo do 
 - **B2** `hash_mismatch` e `size` divergente: nada gravado, sessao encerrada. **B3** pedaco fora de ordem, repetido, maior que `chunk_max`: erro, sem gravar.
 - **B4** ACL: terceiro `get`/`rm`/`list` => `forbidden`/ausente; dono e destinatario leem.
 - **B5** validade: `ttl_s` curto (config de teste) => `get` apos o prazo `not_found`, arquivo some do disco, evento `blob_expired`; TTL acima do maximo recusado; sem TTL usa o padrao.
-- **B6** `direct`: destinatario `rm` apaga na hora; `get --consume` baixa e remove; **mensagem `resulted` remove automaticamente** o blob que ela referencia.
+- **B6** `direct`: destinatario `rm` apaga na hora; `get --consume` baixa e remove; **fechar o recibo (`resulted`) NAO remove o blob**, que continua legivel ate `rm`, `--consume` ou vencer; `chatd ls` mostra `expires_in`.
 - **B7** `multi`: destinatario `release` nao apaga; o ultimo a liberar apaga; dono `rm` apaga tudo; vencimento apaga.
 - **B8** cotas: por arquivo, por dono (tamanho e contagem), total; recusa sem despejo; `disk_full` simulado por limite de teste.
 - **B9** dedup: mesmo conteudo de dois donos = um arquivo; remover um nao quebra o outro; o ultimo remove o arquivo.
@@ -96,4 +96,4 @@ Mesmo usuario do sistema: o diretorio 0700 nao protege contra outro processo do 
 - **B15** compatibilidade: suites v1.1 a v1.7 e a auditoria F continuam verdes; cliente antigo (sem `blob.*`) nao e afetado; metodo `blob.*` em daemon antigo => `method_not_found` tratado pelo cliente novo com mensagem clara.
 
 ## Perguntas abertas (decisao do Jabbur)
-1. ~~TTL padrao de 24 h e maximo de 7 dias servem?~~ **Decidido pelo Jabbur (2026-10-15 noite, "Concordo co A"): padrao 24 h, maximo 7 dias.** 2. ~~Limite de 8 MiB por arquivo e 256 MiB no total servem~~ **Decidido pelo Jabbur (2026-10-15 noite, "A"): 8 MiB por arquivo, 256 MiB no total** o maior documento de hoje, uma spec, tem ~25 KiB; um clipe de camera e proibido por desenho). 3. A rede de seguranca "mensagem `resulted` remove o blob direto" fica? 4. Broadcast (`to: "*"`) ja existe no `chatd`? Se nao, `multi` vale so para mais de um destinatario.
+1. ~~TTL padrao de 24 h e maximo de 7 dias servem?~~ **Decidido pelo Jabbur (2026-10-15 noite, "Concordo co A"): padrao 24 h, maximo 7 dias.** 2. ~~Limite de 8 MiB por arquivo e 256 MiB no total servem~~ **Decidido pelo Jabbur (2026-10-15 noite, "A"): 8 MiB por arquivo, 256 MiB no total** o maior documento de hoje, uma spec, tem ~25 KiB; um clipe de camera e proibido por desenho). 3. ~~A rede de seguranca "mensagem `resulted` remove o blob direto" fica?~~ **Decidido pelo Jabbur (2026-10-15 noite, "B"): NAO fica; so remocao pelo destinatario ou validade.** 4. Broadcast (`to: "*"`) ja existe no `chatd`? Se nao, `multi` vale so para mais de um destinatario.
