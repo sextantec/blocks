@@ -55,7 +55,7 @@ Teste: `$CHATD status` deve mostrar `codex-blocks pendentes=N ...`.
 
 ## Autorizacao permanente do chatd (registrada em 2026-10-15)
 Enviar mensagem e fechar recibo pelo `chatd` local, **com a propria identidade**, e parte do trabalho e **nao pede ok a cada uso**: `send` (qualquer `--kind`), `ack` (`aceito`, `resultado`, `done`/`failed`/`refused`), `inbox`, `status`, `show`, `watch`. Origem: o Jabbur criou o `chatd` para "ser utilizado e consumido somente por agentes" (decisao de 2026-10-15, `crates/chatd/docs/spec-v1.1-agentes.md`) e, em 2026-10-15 noite, apontou que a duvida sobre "servico externo" travou a RESPOSTA da revisao da spec do `agentd` ("Acho que foi esse o problema do Blocks"). **Continua exigindo ok do Jabbur:** qualquer coisa que saia da maquina (rede, push, publicar), gasto de cota alem de Haiku 5.5 e `gpt-6-luna`, mexer em servico, instalar binario, mudar contrato publico.
-**Limite:** a autorizacao vale so com a identidade do **proprio agente** (`chatd whoami` deve dizer o seu nome). Se disser `jabbur` ou outro nome, **nao envie**: pare e avise por esta conversa.
+**Limite:** a autorizacao vale so com a identidade do **proprio agente**: o campo **`as=`** do `chatd whoami` deve ser o seu nome. Se `as=` disser `jabbur` ou outro nome, **nao envie**: pare e avise por esta conversa. **A linha `profile=` e so informativa** na versao instalada (v1.5 mostra o `default_profile` do arquivo mesmo quando a identidade vem do ambiente); `as=codex-blocks (env)` com `profile=jabbur` **esta correto** e voce pode enviar. A v1.6 remove essa linha enganosa.
 
 ## Responder (o que voce precisa decorar)
 Escreva o corpo num arquivo e envie. **Nunca** ponha texto com crases, `$` ou aspas direto na linha de comando.
