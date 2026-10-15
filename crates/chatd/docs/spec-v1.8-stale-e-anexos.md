@@ -52,29 +52,29 @@ Decisao: "o status deve dizer somente se o daemon esta funcionando e estatistica
 ### Modelo
 - **Blob:** arquivo opaco identificado por `blob:<sha256>` (64 hex). O conteudo nunca e interpretado, executado nem logado.
 - **Dono:** a identidade que enviou. **Leitores:** dono + os destinatarios declarados no envio (`to`). Ninguem mais le (identidade pelo token, como hoje).
-- **Modo (derivado):** **`direct`** = exatamente um destinatario e nao broadcast; **`multi`** = mais de um destinatario ou broadcast (`to: "*"` quando existir).
+- **Um destinatario por blob (decisao do Jabbur, 2026-10-15 noite, "A" na pendencia 7):** nao ha broadcast nem lista de destinatarios no `chatd`; um blob tem **um dono e um destinatario**. Para mandar o mesmo arquivo a dois agentes, envia-se duas vezes; o hash **deduplica o arquivo no disco** (nao ocupa o dobro). O modo `multi`, `release` e a contagem de liberacoes ficam **fora desta versao**.
 - **Validade obrigatoria:** todo blob tem `expires_at`. Padrao `blob_default_ttl_s` = 86400 (24 h); maximo `blob_max_ttl_s` = 604800 (7 dias); pedido acima do maximo e recusado (`invalid_envelope`).
 - **Armazenamento:** `D/blobs/<aa>/<sha256>` (0600, diretorio 0700; `aa` = 2 primeiros hex), escrita atomica (arquivo temporario, `fsync`, `rename`); o nome do arquivo no disco **e sempre o hash**; `name` do cliente e so metadado (`[A-Za-z0-9._-]{1,64}`), nunca vira caminho.
-- **Metadados** persistem no `log.jsonl` (eventos `blob_put`, `blob_got`, `blob_released`, `blob_removed`, `blob_expired`, com `sha`, `size`, `owner`, `to`, `mode`, `expires_at`, `name`, `reason`); o conteudo nao entra no log. Na partida o daemon reconstroi o indice pelo log e **remove do disco** arquivos sem evento correspondente (orfaos) e os vencidos.
+- **Metadados** persistem no `log.jsonl` (eventos `blob_put`, `blob_got`, `blob_removed`, `blob_expired`, com `sha`, `size`, `owner`, `to`, `expires_at`, `name`, `reason`); o conteudo nao entra no log. Na partida o daemon reconstroi o indice pelo log e **remove do disco** arquivos sem evento correspondente (orfaos) e os vencidos.
 
 ### Protocolo (novos metodos; `v: 1` inalterado; clientes antigos nao sao afetados)
 Linha de 1 MiB: o envio e em pedacos de ate **512 KiB** brutos (~700 KiB em base64).
-- **`blob.put.begin`** `{v, size, name?, to:[N...], ttl_s?}` -> `{v, upload_id, chunk_max}`. Recusa: `size > blob_max_bytes` (padrao 8 MiB) => `too_large`; cota => `quota_exceeded`; `to` vazio ou nome desconhecido => `unknown_recipient`.
+- **`blob.put.begin`** `{v, size, name?, to:N, ttl_s?}` -> `{v, upload_id, chunk_max}`. Recusa: `size > blob_max_bytes` (padrao 8 MiB) => `too_large`; cota => `quota_exceeded`; `to` ausente, lista ou nome desconhecido => `unknown_recipient`.
 - **`blob.put.chunk`** `{v, upload_id, n, data}` (`n` consecutivo a partir de 0; `data` base64) -> `{v, received}`.
-- **`blob.put.end`** `{v, upload_id, sha256}` -> `{v, blob:"blob:<sha>", size, expires_at, mode}`. O daemon recalcula o SHA-256 e o tamanho; divergencia => `hash_mismatch`, nada e gravado. Mesmo conteudo ja existente = **deduplicado** (um arquivo, uma entrada por dono, contagem de referencias).
+- **`blob.put.end`** `{v, upload_id, sha256}` -> `{v, blob:"blob:<sha>", size, expires_at}`. O daemon recalcula o SHA-256 e o tamanho; divergencia => `hash_mismatch`, nada e gravado. Mesmo conteudo ja existente = **deduplicado** (um arquivo, uma entrada por dono, contagem de referencias).
 - **`blob.get`** `{v, blob, offset?, length?}` -> `{v, size, offset, data}` (pedacos de ate 512 KiB). Somente dono e leitores; outro => `forbidden`; inexistente ou vencido => `not_found`.
-- **`blob.rm`** `{v, blob}` -> `{v, removed:bool, remaining}`. **`direct`:** dono **ou** destinatario remove (apaga na hora). **`multi`:** o dono remove tudo; um destinatario so **libera** (`blob_released`); o arquivo some quando todos liberaram, o dono removeu ou venceu.
+- **`blob.rm`** `{v, blob}` -> `{v, removed:true}`. **Dono ou destinatario** remove (apaga o vinculo; o arquivo sai do disco quando nao resta nenhum vinculo, pela deduplicacao).
 - **`blob.list`** `{v}` -> blobs em que a identidade e dono ou leitora (so metadados).
 - Uploads: sessao expira em **120 s** sem pedaco; ate **4** simultaneos por identidade; sem retomada (reinicia).
 
 ### Regras de limpeza (quem remove, e o que garante que nao enche)
 1. **Validade:** coleta na partida e a cada 60 s (`blob_gc_s`); vencido => arquivo apagado, evento `blob_expired`, `blob.get` => `not_found`.
 2. **Direto (decisao do Jabbur):** o agente que **recebeu** remove o arquivo depois de usar (`chatd get --consume BLOB` baixa e remove; ou `chatd rm`). **Nao ha remocao automatica quando a mensagem chega a `resultado`** (decisao do Jabbur, 2026-10-15 noite, "B": o agente pode reler o anexo depois de fechar o recibo). O que garante que nao enche e a **validade** (24 h) e as cotas; `chatd ls` mostra, por blob, `expires_in` e se ja foi lido, para o agente e o dono verem o que ficou.
-3. **Multi/broadcast:** cada destinatario libera (`chatd release BLOB`); sai quando todos liberaram, o dono removeu ou venceu. Recebedor nao remove sozinho (outros ainda precisam).
+3. **Deduplicacao:** o arquivo so e apagado do disco quando o ultimo vinculo (dono/destinatario de qualquer blob com o mesmo hash) some por `rm`, `--consume` ou validade.
 4. **Cotas (recusa, nunca despejo):** `blob_max_bytes` 8 MiB por arquivo; `blob_owner_max_bytes` 64 MiB e `blob_owner_max_count` 32 por dono; `blob_total_max_bytes` 256 MiB no total; espaco livre abaixo de 2x o arquivo => `disk_full`. Quota cheia gera `quota_exceeded` com a conta, sem apagar nada de ninguem.
 
 ### Cliente (CLI)
-`chatd put FILE [--to N]... [--name N] [--ttl DUR] [--json]` | `chatd get BLOB [--out PATH|-] [--consume]` | `chatd rm BLOB` | `chatd release BLOB` | `chatd ls`. **`chatd send --attach FILE`** (repetivel, ate 8): faz `put` para os `--to` da mensagem e acrescenta em `refs` `{"t":"blob","v":"blob:<sha>"}`. `get --out -` escreve em stdout (para sandbox sem pasta gravavel). **Denylist por nome** no cliente (`.env`, `*.token`, `auth.json`, `*.pem`, `id_*`, `*.key`): recusa com saida 2 e a explicacao; **nao ha varredura de conteudo** (limite declarado: o conteudo e responsabilidade de quem anexa). Identidade explicita como na v1.6.
+`chatd put FILE --to N [--name N] [--ttl DUR] [--json]` | `chatd get BLOB [--out PATH|-] [--consume]` | `chatd rm BLOB` | `chatd ls`. **`chatd send --attach FILE`** (repetivel, ate 8): faz `put` para os `--to` da mensagem e acrescenta em `refs` `{"t":"blob","v":"blob:<sha>"}`. `get --out -` escreve em stdout (para sandbox sem pasta gravavel). **Denylist por nome** no cliente (`.env`, `*.token`, `auth.json`, `*.pem`, `id_*`, `*.key`): recusa com saida 2 e a explicacao; **nao ha varredura de conteudo** (limite declarado: o conteudo e responsabilidade de quem anexa). Identidade explicita como na v1.6.
 
 ### Seguranca e limites declarados
 Mesmo usuario do sistema: o diretorio 0700 nao protege contra outro processo do **mesmo** uid; o controle e por identidade/token do protocolo (limite ja conhecido da v1.1). Conteudo nunca executado, nunca no log, nunca em `watch`. Nenhum nome do cliente vira caminho; links simbolicos nunca sao seguidos; o daemon nunca le arquivo por caminho enviado pelo cliente (so recebe bytes).
@@ -85,15 +85,15 @@ Mesmo usuario do sistema: o diretorio 0700 nao protege contra outro processo do 
 - **B4** ACL: terceiro `get`/`rm`/`list` => `forbidden`/ausente; dono e destinatario leem.
 - **B5** validade: `ttl_s` curto (config de teste) => `get` apos o prazo `not_found`, arquivo some do disco, evento `blob_expired`; TTL acima do maximo recusado; sem TTL usa o padrao.
 - **B6** `direct`: destinatario `rm` apaga na hora; `get --consume` baixa e remove; **fechar o recibo (`resulted`) NAO remove o blob**, que continua legivel ate `rm`, `--consume` ou vencer; `chatd ls` mostra `expires_in`.
-- **B7** `multi`: destinatario `release` nao apaga; o ultimo a liberar apaga; dono `rm` apaga tudo; vencimento apaga.
+- **B7** dedup entre destinatarios: o mesmo arquivo enviado a dois agentes ocupa um so arquivo no disco; `rm` de um nao quebra o outro; o ultimo `rm` (ou validade) apaga o arquivo.
 - **B8** cotas: por arquivo, por dono (tamanho e contagem), total; recusa sem despejo; `disk_full` simulado por limite de teste.
 - **B9** dedup: mesmo conteudo de dois donos = um arquivo; remover um nao quebra o outro; o ultimo remove o arquivo.
 - **B10** reinicio do daemon: indice reconstruido; arquivo orfao e vencido removidos; upload em andamento descartado.
 - **B11** upload: sessao expira em 120 s (relogio de teste), 5o upload simultaneo recusado, nome com `../` ou `/`, link simbolico como `FILE`, denylist.
 - **B12** privacidade: sentinela no conteudo, no `name` e no assunto: nao aparece no log, em `watch`, em `status`, nem em stderr.
-- **B13** `send --attach`: cria `refs` do tipo `blob`, deriva os leitores do `--to`, e o `inbox` mostra a referencia (nao o conteudo).
+- **B13** `send --attach`: cria `refs` do tipo `blob`, deriva o destinatario do `--to` (exatamente um), e o `inbox` mostra a referencia (nao o conteudo).
 - **B14** `get --out -` (stdout) e `--out` em diretorio sem permissao: erro limpo (saida 5 pela v1.6), sem arquivo parcial.
 - **B15** compatibilidade: suites v1.1 a v1.7 e a auditoria F continuam verdes; cliente antigo (sem `blob.*`) nao e afetado; metodo `blob.*` em daemon antigo => `method_not_found` tratado pelo cliente novo com mensagem clara.
 
 ## Perguntas abertas (decisao do Jabbur)
-1. ~~TTL padrao de 24 h e maximo de 7 dias servem?~~ **Decidido pelo Jabbur (2026-10-15 noite, "Concordo co A"): padrao 24 h, maximo 7 dias.** 2. ~~Limite de 8 MiB por arquivo e 256 MiB no total servem~~ **Decidido pelo Jabbur (2026-10-15 noite, "A"): 8 MiB por arquivo, 256 MiB no total** o maior documento de hoje, uma spec, tem ~25 KiB; um clipe de camera e proibido por desenho). 3. ~~A rede de seguranca "mensagem `resulted` remove o blob direto" fica?~~ **Decidido pelo Jabbur (2026-10-15 noite, "B"): NAO fica; so remocao pelo destinatario ou validade.** 4. Broadcast (`to: "*"`) ja existe no `chatd`? Se nao, `multi` vale so para mais de um destinatario.
+1. ~~TTL padrao de 24 h e maximo de 7 dias servem?~~ **Decidido pelo Jabbur (2026-10-15 noite, "Concordo co A"): padrao 24 h, maximo 7 dias.** 2. ~~Limite de 8 MiB por arquivo e 256 MiB no total servem~~ **Decidido pelo Jabbur (2026-10-15 noite, "A"): 8 MiB por arquivo, 256 MiB no total** o maior documento de hoje, uma spec, tem ~25 KiB; um clipe de camera e proibido por desenho). 3. ~~A rede de seguranca "mensagem `resulted` remove o blob direto" fica?~~ **Decidido pelo Jabbur (2026-10-15 noite, "B"): NAO fica; so remocao pelo destinatario ou validade.** 4. ~~Broadcast (`to: "*"`) ja existe no `chatd`?~~ **Decidido pelo Jabbur (2026-10-15 noite, "A"): nao existe e nao sera criado; um destinatario por blob.**
