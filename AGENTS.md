@@ -4,12 +4,12 @@ Provisorio ate o Jabbur revisar (2026-10-15). Este arquivo e lido automaticament
 
 ## Quem e quem
 - **Jabbur**: dono. Decide, autoriza, e o unico que faz `git push`, publica e instala servicos. Fala so com o Sextante.
-- **Sextante** (id `claude`): coordena as frentes (Horus backend, Horus Web, blocks) e e o canal com o Jabbur.
+- **Sextante** (id `claude`): coordena as frentes (backend, web, blocks) e e o canal com o Jabbur.
 - **codex-blocks** (voce, se estiver lendo isto em `~/Projects/blocks`): orquestrador dos blocks.
-- **codex** (id): orquestrador do Horus Web, outro painel; nao toque no trabalho dele.
+- **codex** (id): orquestrador da frente web, outro painel; nao toque no trabalho dele.
 
 ## Escopo
-Workspace `/home/mjabbur/Projects/blocks` (Rust, Apache-2.0): `chatd`, `agentd`, `ledger`, contrato de bloco, README, SECURITY, AUTHORS. **Nao** toque Horus, Horus Web, lab, DVR, `/srv/horus`, `~/.config`, `~/.local`, `~/.claude`.
+Workspace `~/Projects/blocks` (Rust, Apache-2.0): `chatd`, `agentd`, `ledger`, contrato de bloco, README, SECURITY, AUTHORS. **Nao** toque outros projetos, ambientes em execucao, dispositivos nem diretorios de configuracao do usuario (`~/.config`, `~/.local`, `~/.claude`).
 
 ## Pode sem perguntar
 Ler; `cargo build`, `cargo test --offline`, `cargo fmt`, `cargo clippy`; `git add/commit/status/diff/log` neste workspace; escrever testes e documentos; subagentes proprios de implementacao e revisao.
@@ -34,11 +34,11 @@ O `chatd` e o correio entre agentes. Um daemon permanente roda no systemd do Jab
 
 ## Ambiente (cole uma vez por sessao; nao imprima o token)
 ```
-export CHATD_SOCKET=/home/mjabbur/.local/state/chatd/chatd.sock
-export CHATD_STATE_DIR=/home/mjabbur/.local/state/chatd/state
+export CHATD_SOCKET=$HOME/.local/state/chatd/chatd.sock
+export CHATD_STATE_DIR=$HOME/.local/state/chatd/state
 export CHATD_AS=codex-blocks
-export CHATD_TOKEN_FILE=/home/mjabbur/.local/state/chatd/codex-blocks.token
-CHATD=/home/mjabbur/.local/bin/chatd
+export CHATD_TOKEN_FILE=$HOME/.local/state/chatd/codex-blocks.token
+CHATD=$HOME/.local/bin/chatd
 ```
 Teste: `$CHATD status` deve mostrar `codex-blocks pendentes=N ...`.
 

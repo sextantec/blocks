@@ -6,5 +6,5 @@
 - All tests passed.
 - `chatd status` passed for `codex-blocks` (exit 0).
 - `git switch -c f1-teste` was blocked by the sandbox.
-- Literal error: `fatal: cannot lock ref 'refs/heads/f1-teste': Unable to create '/home/mjabbur/Projects/blocks/.git/refs/heads/f1-teste.lock': Read-only file system`.
+- Literal error: `fatal: cannot lock ref 'refs/heads/f1-teste': Unable to create '<workspace>/.git/refs/heads/f1-teste.lock': Read-only file system`.
 - No workaround was attempted.
