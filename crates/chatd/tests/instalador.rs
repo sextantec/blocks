@@ -105,6 +105,34 @@ pid_vivo() {
   if grep -q '^[0-9]* ([^)]*) Z' "/proc/$p/stat"; then return 1; fi
   return 0
 }
+iniciar() {
+  # $1 = binario do daemon; $2 = sim|nao (sim: morre FAKE_MORRE_EM s depois de subir)
+  local bin="$1" novo
+  "$bin" serve --state-dir "$FAKE_UNIT_STATE" --config "$FAKE_UNIT_CONFIG" --socket "$FAKE_UNIT_SOCK" >/dev/null 2>&1 </dev/null &
+  novo=$!
+  for _ in $(seq 100); do
+    [ "$(readlink "/proc/$novo/exe" 2>/dev/null)" = "$(readlink -f "$bin")" ] && break
+    sleep 0.02
+  done
+  echo "$novo" > "$pidf"
+  if [ "$2" = sim ]; then
+    ( sleep "$FAKE_MORRE_EM"; kill -KILL "$novo" ) >/dev/null 2>&1 &
+  fi
+}
+bin_daemon() { echo "${FAKE_DAEMON_BIN:-$FAKE_EXEC}"; }
+contador() {
+  local f="$dir/$nome.$1" v
+  v=$(cat "$f" 2>/dev/null)
+  v=$(( ${v:-0} + 1 ))
+  echo "$v" > "$f"
+  echo "$v"
+}
+sobe_pendente() {
+  if [ -f "$dir/$nome.pendente" ]; then
+    rm -f "$dir/$nome.pendente"
+    iniciar "$(bin_daemon)" nao
+  fi
+}
 case "$acao" in
   restart)
     if ! existe; then
@@ -113,27 +141,32 @@ case "$acao" in
     fi
     if pid_vivo; then kill -TERM "$(cat "$pidf")" 2>/dev/null; fi
     echo 0 > "$pidf"
+    rm -f "$dir/$nome.pendente"
     n=$(( $(cat "$rf" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$rf"
     if [ "$n" -eq 1 ] && [ -n "${FAKE_FALHA_PRIMEIRO_RESTART:-}" ]; then exit 0; fi
-    "$FAKE_EXEC" serve --state-dir "$FAKE_UNIT_STATE" --config "$FAKE_UNIT_CONFIG" --socket "$FAKE_UNIT_SOCK" >/dev/null 2>&1 </dev/null &
-    novo=$!
-    for _ in $(seq 100); do
-      [ "$(readlink "/proc/$novo/exe" 2>/dev/null)" = "$(readlink -f "$FAKE_EXEC")" ] && break
-      sleep 0.02
-    done
-    echo "$novo" > "$pidf"
+    if [ "$n" -eq 1 ] && [ -n "${FAKE_ATRASO_SUBIDA:-}" ]; then touch "$dir/$nome.pendente"; exit 0; fi
+    if [ "$n" -eq 1 ] && [ -n "${FAKE_MORRE_EM:-}" ]; then iniciar "$(bin_daemon)" sim; else iniciar "$(bin_daemon)" nao; fi
     exit 0 ;;
   is-active)
+    ia=$(contador isactive)
+    if [ -f "$dir/$nome.pendente" ] && [ "$ia" -ge 10 ]; then sobe_pendente; fi
     if existe && pid_vivo; then echo active; exit 0; fi
     echo inactive
     exit 3 ;;
   show)
     case "$*" in
-      *MainPID*) if pid_vivo; then cat "$pidf"; else echo 0; fi ;;
+      *MainPID*)
+        m=$(contador mainpid)
+        if [ "$m" -gt 3 ] && [ -f "$dir/$nome.pendente" ]; then sobe_pendente; fi
+        if pid_vivo; then cat "$pidf"; else echo 0; fi ;;
       *ActiveState*) if pid_vivo; then echo active; else echo inactive; fi ;;
       *LoadState*) if existe; then echo loaded; else echo not-found; fi ;;
     esac
+    exit 0 ;;
+  status)
+    echo "FALSO-STATUS-CAPTURADO"
+    echo "linha de status falsa"
     exit 0 ;;
   *)
     if ! existe; then echo "Unit $nome not found." >&2; exit 1; fi
@@ -735,7 +768,7 @@ fn i4_servico_nao_fica_ativo_reverte_binario_e_reinicia_de_novo() {
     );
     assert!(
         r.tudo()
-            .contains("journalctl --user -u chatd.service -n 30 --no-pager"),
+            .contains("journalctl --user-unit chatd.service -n 30 --no-pager"),
         "faltou o comando de diagnostico: {}",
         r.tudo()
     );
@@ -1135,4 +1168,106 @@ fn regra10_relatorio_traz_backup_e_comando_de_reversao() {
         "relatorio sem o restart da reversao: {}",
         r.tudo()
     );
+}
+
+// ---------- Espera, estabilidade e prazo (regras 8 e 9; I12 a I14) ----------
+
+#[test]
+fn i12_pid_zero_nas_tres_primeiras_consultas_nao_reverte() {
+    let mut a = Amb::novo();
+    a.repo_git();
+    let velho = a.velho.clone();
+    let novo = a.novo.clone();
+    a.instala_bin(&velho);
+    a.sobe_servico(SERVICO, &velho);
+    let r = a.roda_com(
+        &["--yes", "--prefix", s(&a.prefix), "--wait", "5"],
+        &[("FAKE_ATRASO_SUBIDA", "1")],
+        None,
+    );
+    assert_eq!(r.code, Some(0), "transitorio nao pode reverter: {r:?}");
+    assert_eq!(
+        a.prefix_bytes(),
+        fs::read(&novo).unwrap(),
+        "a instalacao nao ficou com o binario novo"
+    );
+    assert_eq!(a.reinicios(SERVICO), 1, "houve reversao (segundo restart)");
+    assert_eq!(a.backups().len(), 1, "backup: {:?}", a.backups());
+    assert_eq!(a.exe_servico(SERVICO), fs::read(&novo).unwrap());
+    let consultas = fs::read_to_string(a.svc.join("chatd.service.mainpid"))
+        .ok()
+        .and_then(|t| t.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    assert!(
+        consultas >= 4,
+        "o atraso de subida nao foi exercitado: {consultas} consultas de MainPID"
+    );
+}
+
+#[test]
+fn i13_processo_morre_depois_de_active_reverte_com_status_capturado() {
+    let mut a = Amb::novo();
+    a.repo_git();
+    let velho = a.velho.clone();
+    let bytes_velho = fs::read(&velho).unwrap();
+    a.instala_bin(&velho);
+    a.sobe_servico(SERVICO, &velho);
+    let r = a.roda_com(
+        &["--yes", "--prefix", s(&a.prefix), "--wait", "5"],
+        &[("FAKE_MORRE_EM", "0.3")],
+        None,
+    );
+    assert_eq!(r.code, Some(1), "morte apos active deve reverter: {r:?}");
+    assert_eq!(
+        a.prefix_bytes(),
+        bytes_velho,
+        "o binario antigo nao voltou byte a byte"
+    );
+    assert_eq!(
+        a.reinicios(SERVICO),
+        2,
+        "esperava o restart novo e o restart da reversao"
+    );
+    assert_eq!(
+        a.exe_servico(SERVICO),
+        bytes_velho,
+        "o servico nao voltou ao binario antigo"
+    );
+    assert!(
+        r.tudo().contains("FALSO-STATUS-CAPTURADO"),
+        "a saida de erro nao traz o 'status -n 40' capturado antes da reversao: {}",
+        r.tudo()
+    );
+}
+
+#[test]
+fn i14_sha_divergente_so_reverte_depois_do_prazo() {
+    let mut a = Amb::novo();
+    a.repo_git();
+    let velho = a.velho.clone();
+    let bytes_velho = fs::read(&velho).unwrap();
+    a.instala_bin(&a.novo.clone());
+    a.sobe_servico(SERVICO, &velho);
+    let inicio = Instant::now();
+    let r = a.roda_com(
+        &["--yes", "--prefix", s(&a.prefix), "--wait", "2"],
+        &[("FAKE_DAEMON_BIN", s(&velho))],
+        None,
+    );
+    let decorrido = inicio.elapsed();
+    assert_eq!(
+        r.code,
+        Some(1),
+        "sha divergente ate o prazo deve reverter: {r:?}"
+    );
+    assert!(
+        decorrido >= Duration::from_millis(1900),
+        "reverteu antes do prazo de --wait 2: {decorrido:?}"
+    );
+    assert_eq!(
+        a.prefix_bytes(),
+        bytes_velho,
+        "o binario antigo nao voltou byte a byte"
+    );
+    assert_eq!(a.exe_servico(SERVICO), bytes_velho);
 }
