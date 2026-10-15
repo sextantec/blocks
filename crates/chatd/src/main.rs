@@ -8,6 +8,7 @@ mod config;
 mod hash;
 mod protocol;
 mod server;
+mod stale;
 mod store;
 
 use std::collections::BTreeMap;
@@ -27,6 +28,7 @@ chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]\n     \
 chatd status [--as N] [--json]\n     \
 chatd whoami [--as N] [--profile N] [--json]\n     \
 chatd log --state-dir D [--tail N]\n     \
+chatd stale [--state-dir D] [--older-than SEC] [--bells N] [--result-older-than SEC] [--notify SINK] [--stamp-file F] [--json]\n     \
 chatd token new|revoke NOME --state-dir D | token list --state-dir D\n     \
 clientes: --socket, CHATD_SOCKET, --state-dir ou CHATD_STATE_DIR; identidade: --as/--from ou CHATD_AS; token: --token-file ou CHATD_TOKEN_FILE";
 
@@ -36,6 +38,7 @@ pub enum Failure {
     BindForbidden(String),
     Unavailable(String),
     PermissionDenied(String),
+    StaleAlerts,
     /// Erro de uso sem a ajuda longa (saida 2): so a linha `chatd: <msg>`.
     Bad(String),
 }
@@ -155,6 +158,7 @@ fn main() {
             eprintln!("chatd: {m}");
             5
         }
+        Err(Failure::StaleAlerts) => 6,
     };
     std::process::exit(code);
 }
@@ -174,6 +178,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "status" => client::status(rest),
         "whoami" => client::whoami(rest),
         "log" => client::log(rest),
+        "stale" => stale::run(rest),
         "token" => auth::cli(rest),
         "-h" | "--help" => {
             println!("{USAGE}");
