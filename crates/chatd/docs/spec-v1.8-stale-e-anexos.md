@@ -39,6 +39,14 @@ O `codex-blocks` perde a rede da sandbox as 15:40 e a campainha toca de 10 em 10
 ### Problema (exemplo)
 Agentes em sandboxes diferentes **nao enxergam os arquivos uns dos outros**; o unico canal que todos alcancam e o socket do `chatd`. Hoje: o Codex da Web nao le a bancada (grava-se a interface em `docs/agentes/` dentro do repositorio dele); o `codex-blocks` nao leu o repositorio do `agentd`; o brief do Sol precisa ser inline (teto de 64 KB); o corpo da mensagem tem teto de 16 KiB.
 
+### B.0 `status` passa a dizer so "esta vivo" e estatisticas (decisao do Jabbur, 2026-10-15 noite)
+Decisao: "o status deve dizer somente se o daemon esta funcionando e estatisticas, nada mais. Nao precisamos dizer quem roda e perfis."
+- **`status`** `{v}` -> `{v, ok:true, version, uptime_s, head_seq, messages:{total, registered, accepted, resulted}, bells:{sent, failed}, connections, blobs:{count, bytes}}`. **Sem nomes** de agente, destinatario, perfil, painel nem remetente; so contagens. **Nao exige autenticacao** (qualquer cliente do mesmo uid), mesmo com a auth ligada; nao muda por quem pergunta.
+- **O que sai do `status`:** `recipients{NOME:{pending, accepted, bell, last_bell_seq}}`. Quem precisa da propria caixa usa **`mailbox.counts`** `{v}` (autenticado): `{v, pending, accepted, bell, last_bell_seq}` so da identidade que pergunta; CLI `chatd inbox --count`. O estado detalhado por pessoa continua so no `chatd log` (arquivo local) e no `inbox`.
+- **Efeitos a corrigir quando entrar:** `cli.rs` (`status_texto_sai_0_e_cita_os_destinatarios`, `status_json_tem_a_estrutura_da_spec`), `campainha.rs`, `auth.rs`, `protocolo.rs`, `v14_recibos.rs`, `bind_v13.rs` e as suites v1.5/v1.6 que leem `recipients` do `status` passam a usar `mailbox.counts` ou o `log`; a regra da v1.6 "status sem identidade conecta sem autenticar" passa a **ter resposta com a auth ligada**.
+- **Compatibilidade:** mudanca de contrato publico (campo `recipients` removido do `status`); entra **junto com a Parte B** (daemon), com aviso. Ate la, o `status` atual continua como esta.
+- **Testes novos:** **B16** `status` com auth ligada e sem token responde `ok:true` com so contagens; **B17** nenhum nome de agente/destinatario/perfil/painel aparece na resposta (sentinela em nome de destinatario configurado); **B18** `mailbox.counts` devolve so a caixa da identidade; outra identidade nao ve a alheia; **B19** `inbox --count` imprime as tres contagens.
+
 ### Modelo
 - **Blob:** arquivo opaco identificado por `blob:<sha256>` (64 hex). O conteudo nunca e interpretado, executado nem logado.
 - **Dono:** a identidade que enviou. **Leitores:** dono + os destinatarios declarados no envio (`to`). Ninguem mais le (identidade pelo token, como hoje).
