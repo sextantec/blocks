@@ -15,7 +15,7 @@ Workspace `~/Projects/blocks` (Rust, Apache-2.0): `chatd`, `agentd`, `ledger`, c
 Ler; `cargo build`, `cargo test --offline`, `cargo fmt`, `cargo clippy`; `git add/commit/status/diff/log` neste workspace; escrever testes e documentos; subagentes proprios de implementacao e revisao.
 
 ## Precisa de ok (peca ao Sextante por chatd)
-Cota alem de Haiku 5.5 e `gpt-6-luna`; instalar binario, mexer em servico, escrever em `~/.local`, rede, credencial; mudar contrato publico de um bloco (protocolo, `--json`, codigos de saida); tudo que sai para fora (push, publicar, enviar a servico externo).
+Cota alem de Haiku 5.5 e `gpt-6-luna`; instalar binario, mexer em servico, escrever em `~/.local`, rede, credencial; mudar contrato publico de um bloco (protocolo, `--json`, codigos de saida); tudo que sai para fora da maquina (push, publicar, enviar a servico externo). **O `chatd` nao e servico externo:** e o canal de trabalho local (socket Unix, mesmo usuario) e esta liberado, ver "Autorizacao permanente do chatd".
 
 ## Regras
 1. Contrato antes do codigo; teste independente (de quem nao implementou) e mutacao antes de aceitar; auditoria para o que toca identidade, token ou log.
@@ -49,6 +49,10 @@ Teste: `$CHATD status` deve mostrar `codex-blocks pendentes=N ...`.
   ```
   Isso lista as mensagens (id, tipo, remetente, assunto, corpo) e as marca como `aceito`.
 - Sem campainha: `$CHATD inbox` lista o que esta pendente; `$CHATD status` mostra a contagem.
+
+## Autorizacao permanente do chatd (registrada em 2026-10-15)
+Enviar mensagem e fechar recibo pelo `chatd` local, **com a propria identidade**, e parte do trabalho e **nao pede ok a cada uso**: `send` (qualquer `--kind`), `ack` (`aceito`, `resultado`, `done`/`failed`/`refused`), `inbox`, `status`, `show`, `watch`. Origem: o Jabbur criou o `chatd` para "ser utilizado e consumido somente por agentes" (decisao de 2026-10-15, `crates/chatd/docs/spec-v1.1-agentes.md`) e, em 2026-10-15 noite, apontou que a duvida sobre "servico externo" travou a RESPOSTA da revisao da spec do `agentd` ("Acho que foi esse o problema do Blocks"). **Continua exigindo ok do Jabbur:** qualquer coisa que saia da maquina (rede, push, publicar), gasto de cota alem de Haiku 5.5 e `gpt-6-luna`, mexer em servico, instalar binario, mudar contrato publico.
+**Limite:** a autorizacao vale so com a identidade do **proprio agente** (`chatd whoami` deve dizer o seu nome). Se disser `jabbur` ou outro nome, **nao envie**: pare e avise por esta conversa.
 
 ## Responder (o que voce precisa decorar)
 Escreva o corpo num arquivo e envie. **Nunca** ponha texto com crases, `$` ou aspas direto na linha de comando.
