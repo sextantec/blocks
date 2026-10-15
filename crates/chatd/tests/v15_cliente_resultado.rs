@@ -485,16 +485,23 @@ fn c1_sem_arquivo_e_sem_variaveis_e_erro_de_uso() {
     );
 }
 
+// atualizado pela v1.6: so CHATD_SOCKET nao tem identidade explicita; a saida 2 vem com
+// "identidade nao definida" antes de qualquer checagem de token (regra A.3). O cenario completo da v1.4
+// (CHATD_AS + CHATD_TOKEN_FILE + CHATD_SOCKET) continua abaixo, igual.
 #[test]
 fn c1_com_variaveis_da_v14_a_saida_e_igual_regressao_zero() {
     let (a, _srv) = amb_servidor();
     let sock = a.socket().display().to_string();
-    // So o socket: a v1.4 exige identidade e token; a mensagem de erro e a da v1.4.
+    // So o socket: sem --as/CHATD_AS e sem --profile, o cliente nao define identidade (fail-closed).
     let so_socket = roda(&a, &["status"], &[("CHATD_SOCKET", sock.as_str())]);
     assert_eq!(so_socket.code, Some(2), "so CHATD_SOCKET: {so_socket:?}");
     assert!(
-        so_socket.stderr.contains("token ausente"),
-        "mensagem da v1.4 para token ausente: {so_socket:?}"
+        so_socket.stderr.contains("identidade nao definida"),
+        "mensagem de identidade ausente (v1.6, regra A.3): {so_socket:?}"
+    );
+    assert!(
+        !so_socket.stderr.contains("token ausente"),
+        "com identidade nao definida, o erro de token nao aparece antes: {so_socket:?}"
     );
     // Identidade completa da v1.4 (CHATD_SOCKET, CHATD_AS, CHATD_TOKEN_FILE de A): saida 0 e regressao zero.
     let tok = a.token(A).display().to_string();
@@ -526,27 +533,24 @@ fn c1_com_variaveis_da_v14_a_saida_e_igual_regressao_zero() {
     );
 }
 
-// ---------- C2: default_profile faz status funcionar sem variaveis; whoami mostra a origem ----------
+// ---------- C2: whoami mostra a origem; default_profile nao da identidade (v1.6) ----------
 
+// atualizado pela v1.6: default_profile e ignorado como fonte de identidade (regra A.5 revogada); sem
+// --as/--profile e sem variaveis, status e inbox saem 2 sem conectar.
 #[test]
-fn c2_default_profile_faz_status_e_inbox_sem_nenhuma_variavel() {
-    let (a, _srv) = amb_servidor();
-    grava_cfg(&a, &cfg_perfis(&a));
-    let r = roda(&a, &["status"], &[]);
-    assert_eq!(r.code, Some(0), "status sem variaveis: {r:?}");
-    let r2 = roda(&a, &["inbox", "--json"], &[]);
-    assert_eq!(
-        r2.code,
-        Some(0),
-        "inbox sem variaveis (perfil padrao): {r2:?}"
-    );
-}
-
-#[test]
-fn c2_whoami_mostra_a_identidade_do_perfil_padrao() {
+fn c2_default_profile_nao_fornece_mais_identidade_v16() {
     let a = Amb::novo();
     grava_cfg(&a, &cfg_perfis(&a));
-    let (r, j) = whoami_json(&a, &[], &[]);
+    let _ = erro_sem_conectar(&a, &["status"], &[]);
+    let _ = erro_sem_conectar(&a, &["inbox", "--json"], &[]);
+}
+
+// atualizado pela v1.6: o teste escolhe o perfil com --profile; default_profile sozinho nao define identidade.
+#[test]
+fn c2_whoami_mostra_a_identidade_do_perfil_escolhido() {
+    let a = Amb::novo();
+    grava_cfg(&a, &cfg_perfis(&a));
+    let (r, j) = whoami_json(&a, &["--profile", "claude"], &[]);
     assert_eq!(r.code, Some(0), "whoami: {r:?}");
     assert_eq!(txt(&j, "as"), A);
     assert_eq!(txt(&j, "profile"), "claude");
@@ -554,29 +558,31 @@ fn c2_whoami_mostra_a_identidade_do_perfil_padrao() {
     assert_eq!(txt(&j, "token_file"), a.token(A).display().to_string());
 }
 
+// atualizado pela v1.6: com --profile explicito, a identidade vem do perfil e a origem e profile:NOME
+// (Esclarecimento 1). O socket continua vindo do arquivo ("config").
 #[test]
 fn c2_whoami_mostra_origem_config_para_o_perfil() {
     let a = Amb::novo();
     grava_cfg(&a, &cfg_perfis(&a));
-    let r = roda(&a, &["whoami"], &[]);
+    let r = roda(&a, &["whoami", "--profile", "claude"], &[]);
     assert_eq!(r.code, Some(0), "{r:?}");
     let linhas: Vec<&str> = r.stdout.lines().collect();
     let sock = a.socket().display().to_string();
     assert!(
-        linhas.contains(&format!("as={A} (config)").as_str()),
-        "linha as sem origem config: {linhas:?}"
+        linhas.contains(&format!("as={A} (profile:claude)").as_str()),
+        "linha as sem origem profile:claude: {linhas:?}"
     );
     assert!(
         linhas.contains(&format!("socket={sock} (config)").as_str()),
         "linha socket sem origem config: {linhas:?}"
     );
-    let (_, j) = whoami_json(&a, &[], &[]);
-    assert_eq!(fonte(&j, "as"), "config");
-    assert_eq!(fonte(&j, "profile"), "config");
+    let (_, j) = whoami_json(&a, &["--profile", "claude"], &[]);
+    assert_eq!(fonte(&j, "as"), "profile:claude");
 }
 
 // ---------- C3: precedencia por valor: flag > env > arquivo ----------
 
+// atualizado pela v1.6: a terceira checagem usa --profile explicito (default_profile nao da identidade).
 #[test]
 fn c3_as_de_flag_e_env_vencem_o_perfil() {
     let a = Amb::novo();
@@ -586,8 +592,9 @@ fn c3_as_de_flag_e_env_vencem_o_perfil() {
     assert_eq!(txt(&j, "as"), "outro-flag", "--as deve vencer o perfil");
     let (_, j2) = whoami_json(&a, &[], &[("CHATD_AS", "outro-env")]);
     assert_eq!(txt(&j2, "as"), "outro-env", "CHATD_AS deve vencer o perfil");
-    let (_, j3) = whoami_json(&a, &[], &[]);
-    assert_eq!(txt(&j3, "as"), A, "sem flag nem env, vale o perfil");
+    // v1.6: sem flag, env nem --profile, default_profile nao escolhe perfil: as fica null.
+    let (_, j3) = whoami_json(&a, &["--profile", "claude"], &[]);
+    assert_eq!(txt(&j3, "as"), A, "sem flag nem env, vale o perfil escolhido");
 }
 
 #[test]
@@ -636,6 +643,7 @@ fn c3_socket_token_flag_env_e_arquivo_nesta_ordem() {
     );
 }
 
+// atualizado pela v1.6: token_file e profile sem perfil escolhido tem origem unset/ignored, nao config.
 #[test]
 fn c3_whoami_mostra_a_origem_certa_em_cada_campo() {
     let a = Amb::novo();
@@ -649,20 +657,21 @@ fn c3_whoami_mostra_a_origem_certa_em_cada_campo() {
     assert_eq!(fonte(&j, "as"), "flag");
     assert_eq!(fonte(&j, "socket"), "env");
     assert_eq!(fonte(&j, "state_dir"), "config");
-    assert_eq!(fonte(&j, "token_file"), "config");
-    assert_eq!(fonte(&j, "profile"), "config");
-    // Sem config, so com CHATD_SOCKET: campo nao resolvido tem valor null e origem "-" (saida --json).
+    // v1.6: sem --profile, default_profile nao fornece token nem perfil: origens "unset" e "ignored".
+    assert_eq!(fonte(&j, "token_file"), "unset");
+    assert_eq!(fonte(&j, "profile"), "ignored");
+    // Sem config, so com CHATD_SOCKET: campo nao resolvido tem valor null e origem "unset" (atualizado pela v1.6, Esclarecimento 11).
     let b = Amb::novo();
     let (rb, jb) = whoami_json(&b, &[], &[("CHATD_SOCKET", "/caminho/do/env.sock")]);
     assert_eq!(rb.code, Some(0), "{rb:?}");
     assert_eq!(jb["as"], Value::Null);
-    assert_eq!(fonte(&jb, "as"), "-");
+    assert_eq!(fonte(&jb, "as"), "unset");
     assert_eq!(fonte(&jb, "socket"), "env");
-    // Sem --json, a linha de campo nao resolvido e `as=- (-)` (outra execucao, saida de texto).
+    // Sem --json, a linha de campo nao resolvido e `as=- (unset)` (atualizado pela v1.6, Esclarecimento 11).
     let rt = roda(&b, &["whoami"], &[("CHATD_SOCKET", "/caminho/do/env.sock")]);
     assert_eq!(rt.code, Some(0), "{rt:?}");
     assert!(
-        rt.stdout.lines().any(|l| l == "as=- (-)"),
+        rt.stdout.lines().any(|l| l == "as=- (unset)"),
         "linha de campo nao resolvido ausente: {:?}",
         rt.stdout
     );
@@ -696,6 +705,7 @@ fn c3_flag_e_env_juntas_a_flag_vence() {
 
 // ---------- C4: --profile e CHATD_PROFILE selecionam o perfil ----------
 
+// atualizado pela v1.6: sem --profile/CHATD_PROFILE, default_profile nao escolhe perfil (as fica null).
 #[test]
 fn c4_profile_flag_e_env_selecionam_o_perfil() {
     let a = Amb::novo();
@@ -711,7 +721,7 @@ fn c4_profile_flag_e_env_selecionam_o_perfil() {
         "CHATD_PROFILE=codex deve dar as=codex-web"
     );
     let (_, j3) = whoami_json(&a, &[], &[]);
-    assert_eq!(txt(&j3, "as"), A, "sem escolha, vale default_profile");
+    assert!(j3["as"].is_null(), "sem escolha explicita, as e null (v1.6): {j3}");
 }
 
 #[test]
@@ -740,11 +750,13 @@ fn c5_arquivo_0666_gravavel_por_outros_e_recusado_sem_conectar_nem_ecoar() {
     );
 }
 
+// atualizado pela v1.6: a identidade vem de --profile explicito, nao de default_profile.
 #[test]
 fn c5_arquivo_0600_e_aceito() {
     let (a, _srv) = amb_servidor();
     escreve(&a.cfg_padrao(), &cfg_perfis(&a).to_string(), 0o600);
-    let r = roda(&a, &["status"], &[]);
+    // v1.6: sem --profile o default_profile nao da identidade; o teste de permissao usa o perfil explicito.
+    let r = roda(&a, &["status", "--profile", "claude"], &[]);
     assert_eq!(
         r.code,
         Some(0),
@@ -814,18 +826,22 @@ fn c6_tipo_errado_e_saida_2() {
 
 // ---------- C7: token nunca aparece; serve e token new ignoram o arquivo do cliente ----------
 
+// atualizado pela v1.6: o perfil e escolhido com --profile (default_profile nao fornece identidade).
 #[test]
 fn c7_token_nunca_aparece_em_whoami_stderr_ou_log() {
     let (a, _srv) = amb_servidor();
     grava_cfg(&a, &cfg_perfis(&a));
     let tok = fs::read_to_string(a.token(A)).unwrap().trim().to_string();
-    let (wr, wj) = whoami_json(&a, &[], &[]);
-    let w = roda(&a, &["whoami"], &[]);
-    let st = roda(&a, &["status"], &[]);
+    // v1.6: a identidade (e o token) vem de --profile explicito; default_profile sozinho nao basta.
+    let (wr, wj) = whoami_json(&a, &["--profile", "claude"], &[]);
+    let w = roda(&a, &["whoami", "--profile", "claude"], &[]);
+    let st = roda(&a, &["status", "--profile", "claude"], &[]);
     let envio = roda(
         &a,
         &[
             "send",
+            "--profile",
+            "claude",
             "--from",
             A,
             "--to",
@@ -905,6 +921,7 @@ fn c7_serve_e_token_new_ignoram_o_arquivo_do_cliente() {
 
 // ---------- C8: ~/ e expandido, $VAR nao; CHATD_CONFIG ausente = saida 2 ----------
 
+// atualizado pela v1.6: o perfil e escolhido com --profile (default_profile nao fornece identidade).
 #[test]
 fn c8_til_e_expandido_com_home() {
     let a = Amb::novo();
@@ -923,7 +940,7 @@ fn c8_til_e_expandido_com_home() {
             "profiles": {"claude": {"as": A, "token_file": "~/tok/claude.tok"}}
         }),
     );
-    let (r, j) = whoami_json(&a, &[], &[]);
+    let (r, j) = whoami_json(&a, &["--profile", "claude"], &[]);
     assert_eq!(r.code, Some(0), "{r:?}");
     assert_eq!(
         txt(&j, "socket"),
@@ -931,7 +948,7 @@ fn c8_til_e_expandido_com_home() {
     );
     assert_eq!(txt(&j, "state_dir"), st.display().to_string());
     assert_eq!(txt(&j, "token_file"), tok.display().to_string());
-    let s2 = roda(&a, &["status"], &[]);
+    let s2 = roda(&a, &["status", "--profile", "claude"], &[]);
     assert_eq!(s2.code, Some(0), "status pelo socket com ~/: {s2:?}");
 }
 

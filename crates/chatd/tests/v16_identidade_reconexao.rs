@@ -174,8 +174,8 @@ fn whoami_json(a: &Amb, extra: &[&str], envs: &[(&str, &str)]) -> (Saida, Value)
     (r, j)
 }
 
-/// Origem de `campo` no JSON do whoami. AMBIGUO: o contrato da v1.6 diz "source por campo"; a v1.5 usa
-/// `sources.<campo>`. Aceita as duas formas, para nao depender do nome. Valores esperados: "flag", "env", "profile:NOME".
+/// Origem de `campo` no JSON do whoami: `sources.<campo>` (Esclarecimento 1 da v1.6). Valores: flag, env,
+/// profile:NOME, ignored (default_profile) e unset (campo sem origem). Os fallbacks ficam por tolerancia.
 fn origem(j: &Value, campo: &str) -> String {
     if let Some(o) = j["sources"][campo].as_str() {
         return o.to_string();
@@ -561,7 +561,7 @@ fn i1_default_profile_sem_variaveis_sai_2_sem_conectar_e_sem_abrir_token() {
 }
 
 #[test]
-fn i1b_send_sem_identidade_com_default_profile_sai_2_sem_conectar() {
+fn i1b_send_sem_nenhuma_identidade_explicita_sai_2_sem_conectar() {
     let a = Amb::novo();
     let tok = a.p().join("token-fifo-send.tok");
     fifo(&tok);
@@ -578,8 +578,6 @@ fn i1b_send_sem_identidade_com_default_profile_sai_2_sem_conectar() {
         &a,
         &[
             "send",
-            "--from",
-            A,
             "--to",
             B,
             "--kind",
@@ -612,7 +610,10 @@ fn i2_profile_explicito_funciona_e_avisa_que_default_profile_foi_ignorado() {
 #[test]
 fn i3_as_e_token_file_por_ambiente_sem_arquivo_funcionam() {
     let (a, _srv) = amb_servidor();
-    assert!(!a.cfg_padrao().exists(), "o teste nao pode ter arquivo de configuracao");
+    assert!(
+        !a.cfg_padrao().exists(),
+        "o teste nao pode ter arquivo de configuracao"
+    );
     let r = como(&a, A, &["status"]);
     assert_eq!(r.code, Some(0), "{r:?}");
     assert!(
@@ -639,10 +640,17 @@ fn i3b_identidade_do_ambiente_vence_o_default_profile_do_arquivo() {
     let w = como(&a, A, &["whoami", "--json"]);
     assert_eq!(w.code, Some(0), "{w:?}");
     let j = json_da_saida(&w);
-    assert_eq!(txt(&j, "as"), A, "o ambiente (CHATD_AS) deve vencer o perfil padrao: {j}");
+    assert_eq!(
+        txt(&j, "as"),
+        A,
+        "o ambiente (CHATD_AS) deve vencer o perfil padrao: {j}"
+    );
     let r = como(&a, A, &["status"]);
     assert_eq!(r.code, Some(0), "{r:?}");
-    assert!(r.stderr.contains(AVISO_DEFAULT), "o aviso continua valendo: {r:?}");
+    assert!(
+        r.stderr.contains(AVISO_DEFAULT),
+        "o aviso continua valendo: {r:?}"
+    );
 }
 
 // ---------- I4: whoami --json traz a origem de cada campo e nunca o token ----------
@@ -723,7 +731,11 @@ fn i5_chatd_profile_herdado_avisa_no_whoami_e_o_cliente_segue_funcionando() {
             .contains("aviso: identidade jabbur vem de CHATD_PROFILE herdado do ambiente"),
         "aviso de CHATD_PROFILE herdado ausente: {r:?}"
     );
-    assert_eq!(txt(&j, "as"), A, "o perfil herdado ainda fornece a identidade: {j}");
+    assert_eq!(
+        txt(&j, "as"),
+        A,
+        "o perfil herdado ainda fornece a identidade: {j}"
+    );
     let st = roda(&a, &["status"], &[("CHATD_PROFILE", "jabbur")]);
     assert_eq!(st.code, Some(0), "status com CHATD_PROFILE herdado: {st:?}");
 }
@@ -779,6 +791,74 @@ fn i6_arquivo_gravavel_por_outros_continua_saida_2_sem_conectar_nem_ecoar() {
     );
 }
 
+// ---------- I7: whoami e diagnostico (sai 0, as nulo); status sem identidade sai 2 ----------
+
+#[test]
+fn i7_sem_variaveis_com_default_profile_whoami_sai_0_com_as_nulo_e_status_sai_2() {
+    let a = Amb::novo();
+    grava_cfg(&a, &cfg_jabbur(&a));
+    let (r, j) = whoami_json(&a, &[], &[]);
+    assert_eq!(r.code, Some(0), "whoami e diagnostico, nao falha sem identidade: {r:?}");
+    assert!(j["as"].is_null(), "as deve ser null: {j}");
+    assert!(j["profile"].is_null(), "profile null sem perfil escolhido: {j}");
+    assert_eq!(origem(&j, "as"), "unset", "sources.as deve ser unset: {j}");
+    assert!(
+        r.stderr.contains(AVISO_DEFAULT),
+        "aviso de default_profile em stderr: {r:?}"
+    );
+    let _ = erro_sem_conectar(&a, &["status"], &[]);
+}
+
+// ---------- I8: identidade explicita (--from) sem token funciona com daemon auth off; token nao e aberto ----------
+
+/// Configuracao do servidor com `auth: off` (suites v1.1 a v1.5 usam esse modo sem token).
+fn cfg_sem_auth() -> Value {
+    json!({
+        "auth": "off",
+        "herdr_bin": "/nonexistent/chatd-herdr-v16",
+        "bell_poll_ms": 5000,
+        "bell_rearm_s": 600,
+        "recipients": {
+            "claude-main": {"delivery": "watch"},
+            "codex-web": {"delivery": "watch"}
+        }
+    })
+}
+
+#[test]
+fn i8_identidade_explicita_sem_token_funciona_com_auth_off_e_nao_abre_o_token() {
+    let a = Amb::novo();
+    fs::create_dir_all(a.state()).unwrap();
+    let cfg = escreve(&a.p().join("srv-off.json"), &cfg_sem_auth().to_string(), 0o600);
+    let _srv = Srv::sobe(&a, &a.state(), &cfg, "auth-off");
+    // default_profile com token em FIFO: se o cliente abrir o token, bloqueia e o roda estoura (code None).
+    let tok = a.p().join("token-fifo-i8.tok");
+    fifo(&tok);
+    grava_cfg(
+        &a,
+        &json!({
+            "socket": a.socket().display().to_string(),
+            "state_dir": a.state().display().to_string(),
+            "default_profile": "jabbur",
+            "profiles": {"jabbur": {"as": C, "token_file": tok.display().to_string()}}
+        }),
+    );
+    let sock = a.socket().display().to_string();
+    let envs = [("CHATD_SOCKET", sock.as_str())];
+    let r = roda(
+        &a,
+        &[
+            "send", "--from", A, "--to", B, "--kind", "AVISO", "--subject", "s", "--body", "c",
+            "--id", "i8-1",
+        ],
+        &envs,
+    );
+    assert_eq!(r.code, Some(0), "--from explicito com auth off e sem token: {r:?}");
+    assert!(r.stderr.contains(AVISO_DEFAULT), "o aviso continua valendo: {r:?}");
+    let i = roda(&a, &["inbox", "--json", "--as", B], &envs);
+    assert_eq!(i.code, Some(0), "inbox --as sem token com auth off: {i:?}");
+}
+
 // =====================================================================
 // Parte B: reconexao e erro de permissao distinto
 // =====================================================================
@@ -794,7 +874,11 @@ fn r1_daemon_que_aparece_na_terceira_tentativa_recebe_uma_unica_message_send() {
     // ~0, ~100 e ~400 ms: a 3a conecta. Margem de ~150 ms de cada lado.
     let falso = sobe_falso(&a.socket(), Duration::from_millis(250), false);
     let r = envia_cli(&a, A, B, "AVISO", "r16-1");
-    assert_eq!(r.code, Some(0), "send deveria concluir na 3a tentativa: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "send deveria concluir na 3a tentativa: {r:?}"
+    );
     let envios = falso.envios.lock().unwrap().clone();
     assert_eq!(
         envios,
@@ -809,36 +893,87 @@ fn r1b_queda_depois_do_envio_nao_repete_a_mensagem() {
     fs::create_dir_all(a.state()).unwrap();
     emite_token(&a, A);
     // Daemon que le a message.send e fecha a conexao sem responder. Se o cliente repetisse, a 2a chegaria ao falso.
-    // AMBIGUO: o codigo de saida nesse caso nao e fixado no contrato; so se verifica o numero de envios.
+    // Esclarecimento 3: sai 4 e imprime o id.
     let falso = sobe_falso(&a.socket(), Duration::ZERO, true);
-    let _ = envia_cli(&a, A, B, "AVISO", "r16-2");
+    let r = envia_cli(&a, A, B, "AVISO", "r16-2");
     let envios = falso.envios.lock().unwrap().clone();
     assert_eq!(
         envios,
         vec!["r16-2".to_string()],
         "a requisicao ja enviada nao pode ser repetida"
     );
+    assert_eq!(r.code, Some(4), "queda apos o envio: sai 4 sem repetir: {r:?}");
+    assert!(
+        format!("{}{}", r.stdout, r.stderr).contains("r16-2"),
+        "o id da mensagem deve sair na saida (Esclarecimento 3): {r:?}"
+    );
 }
 
-// ---------- R2: socket inexistente por mais de 1,3 s: saida 4 ----------
+// ---------- R2: socket inexistente: 4 tentativas, tempo entre 1,2 e 3 s, saida 4 ----------
 
 #[test]
-fn r2_socket_inexistente_tenta_mais_de_1s_e_sai_4() {
+fn r2_socket_inexistente_leva_entre_1_2_e_3_s_e_sai_4() {
     let a = Amb::novo();
     fs::create_dir_all(a.state()).unwrap();
     emite_token(&a, A);
-    // Nenhum daemon: connect devolve ENOENT em toda tentativa. Esperas 100+300+900 ms = 1,3 s.
-    // AMBIGUO: o limite inferior de 1,25 s e inferido das esperas; o contrato so da o total "<= 1,3 s".
-    // O numero exato de tentativas (4) nao e observado diretamente (sem strace); so o tempo prova as esperas.
+    // Nenhum daemon: connect devolve ENOENT em toda tentativa. Esclarecimento 4: tempo total >= 1,2 s e <= 3 s.
     let t = Instant::now();
     let r = como(&a, A, &["status"]);
     let el = t.elapsed();
     assert_eq!(r.code, Some(4), "daemon indisponivel = saida 4: {r:?}");
     assert!(
-        el >= Duration::from_millis(1250),
+        el >= Duration::from_millis(1200),
         "saiu cedo demais ({el:?}): faltaram as esperas de reconexao"
     );
-    assert!(el < Duration::from_secs(5), "esperou demais: {el:?}");
+    assert!(el <= Duration::from_secs(3), "esperou demais: {el:?}");
+}
+
+#[test]
+fn r2b_socket_obsoleto_sem_ouvinte_recusa_a_conexao_e_sai_4() {
+    let a = Amb::novo();
+    fs::create_dir_all(a.state()).unwrap();
+    emite_token(&a, A);
+    // Arquivo de socket sem ouvinte (o Rust nao apaga o arquivo ao soltar o UnixListener): connect da ECONNREFUSED.
+    {
+        let _l = UnixListener::bind(a.socket()).expect("criar socket obsoleto");
+    }
+    let t = Instant::now();
+    let r = como(&a, A, &["status"]);
+    let el = t.elapsed();
+    assert_eq!(r.code, Some(4), "ECONNREFUSED tambem e daemon fora: {r:?}");
+    assert!(el >= Duration::from_millis(1200), "saiu cedo demais: {el:?}");
+    assert!(el <= Duration::from_secs(3), "esperou demais: {el:?}");
+}
+
+/// Conta as chamadas connect() do cliente ao socket, pelo strace. Esclarecimento 4: "contadas pelo falso";
+/// um falso em Rust nao ve tentativas recusadas (ENOENT/ECONNREFUSED), entao a contagem e feita pelo strace.
+#[test]
+#[ignore = "requer strace e ptrace permitido; conta as 4 chamadas connect (Esclarecimento 4). Rodar com --ignored"]
+fn r2c_conta_quatro_connects_com_strace() {
+    let a = Amb::novo();
+    fs::create_dir_all(a.state()).unwrap();
+    emite_token(&a, A);
+    let trace = a.p().join("connect.trace");
+    let sock = a.socket().display().to_string();
+    let tok = a.token(A).display().to_string();
+    let mut cmd = Command::new("strace");
+    cmd.args(["-f", "-e", "trace=connect", "-o", s(&trace), BIN, "status"]);
+    ambiente(&mut cmd, &a);
+    cmd.env("CHATD_SOCKET", sock.as_str())
+        .env("CHATD_AS", A)
+        .env("CHATD_TOKEN_FILE", tok.as_str());
+    let _ = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("executar strace");
+    let t = fs::read_to_string(&trace).unwrap_or_default();
+    let n = t
+        .lines()
+        .filter(|l| l.contains(&format!("sun_path=\"{sock}\"")))
+        .count();
+    assert_eq!(n, 4, "esperava 4 connects (1 + 3 repeticoes): {t}");
 }
 
 // ---------- R3: EACCES no connect sai 5, uma tentativa, sem caminho do token ----------
@@ -954,10 +1089,80 @@ fn r4_watch_reconecta_apos_reinicio_do_daemon_sem_perder_nem_repetir() {
         seqs.windows(2).all(|w| w[1] == w[0] + 1),
         "seq do log nao contiguo: {seqs:?}"
     );
-    // AMBIGUO: o texto do aviso da reconexao nao e fixado no contrato; so se exige que stderr nao esteja vazio.
+    // Esclarecimento 5: uma linha em stderr que comeca com "aviso: reconectando".
     let err = fs::read_to_string(&err_w).unwrap_or_default();
     assert!(
-        !err.trim().is_empty(),
-        "esperava aviso da reconexao em stderr do watch"
+        err.lines().any(|l| l.starts_with("aviso: reconectando")),
+        "esperava linha 'aviso: reconectando' em stderr do watch: {err:?}"
     );
+}
+
+// ---------- R6: backoff do watch (Esclarecimento 6) ----------
+
+/// Derrubador: aceita e fecha cada conexao logo em seguida, o que faz o `watch` reconectar. Guarda o instante de cada accept.
+fn sobe_derrubador(socket: &Path) -> Arc<Mutex<Vec<Instant>>> {
+    let ouvinte = UnixListener::bind(socket).expect("bind do derrubador");
+    let marcas = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let m2 = Arc::clone(&marcas);
+    thread::spawn(move || {
+        for conn in ouvinte.incoming().map_while(Result::ok) {
+            m2.lock().unwrap().push(Instant::now());
+            drop(conn);
+        }
+    });
+    marcas
+}
+
+/// Roda `watch --as A` + `extra` por `dur` contra o derrubador. Devolve os intervalos (s) entre accepts seguidos.
+/// AMBIGUO: os intervalos medidos incluem a latencia do processo; por isso as tolerancias de 0,05 s e 0,5 s.
+fn intervalos_de_reconexao(a: &Amb, extra: &[&str], dur: Duration) -> Vec<f64> {
+    fs::create_dir_all(a.state()).unwrap();
+    emite_token(a, A);
+    let marcas = sobe_derrubador(&a.socket());
+    let err_p = a.p().join(format!(
+        "watch-r6-{}.err",
+        CONTADOR.fetch_add(1, Ordering::SeqCst)
+    ));
+    let sock = a.socket().display().to_string();
+    let tok = a.token(A).display().to_string();
+    let mut cmd = Command::new(BIN);
+    cmd.args(["watch", "--as", A]).args(extra);
+    ambiente(&mut cmd, a);
+    cmd.env("CHATD_SOCKET", sock.as_str())
+        .env("CHATD_TOKEN_FILE", tok.as_str());
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(File::create(&err_p).unwrap())
+        .spawn()
+        .expect("executar watch");
+    thread::sleep(dur);
+    let _ = child.kill();
+    let _ = child.wait();
+    let m = marcas.lock().unwrap().clone();
+    m.windows(2)
+        .map(|w| w[1].duration_since(w[0]).as_secs_f64())
+        .collect()
+}
+
+#[test]
+fn r6a_watch_sem_reconnect_primeiro_retry_ate_1s_e_nenhum_intervalo_acima_de_5s() {
+    let a = Amb::novo();
+    // Backoff 200 ms a 5 s; 12 s de observacao cobrem o teto.
+    let g = intervalos_de_reconexao(&a, &[], Duration::from_secs(12));
+    assert!(g.len() >= 3, "o watch deveria reconectar varias vezes: {g:?}");
+    assert!(g[0] <= 1.0 + 0.05, "primeiro retry sem --reconnect deve ser <= 1 s: {g:?}");
+    assert!(
+        g.iter().all(|&x| x <= 5.0 + 0.5),
+        "nenhum intervalo acima de 5 s: {g:?}"
+    );
+}
+
+#[test]
+fn r6b_watch_com_reconnect_segue_a_v12_primeiro_1s_depois_2s() {
+    let a = Amb::novo();
+    let g = intervalos_de_reconexao(&a, &["--reconnect"], Duration::from_secs(8));
+    assert!(g.len() >= 2, "o watch com --reconnect deveria reconectar: {g:?}");
+    assert!(g[0] >= 1.0 - 0.05, "primeiro retry com --reconnect >= 1 s: {g:?}");
+    assert!(g[1] >= 2.0 - 0.05, "segundo retry com --reconnect >= 2 s: {g:?}");
 }
