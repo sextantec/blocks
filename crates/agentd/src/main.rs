@@ -1,7 +1,9 @@
-//! agentd: observador conservador do estado dos agentes (esqueleto).
-//! A implementacao e do `codex-blocks`; o contrato esta em `docs/spec.md`.
+mod config;
+mod daemon;
 
 fn main() {
-    eprintln!("agentd: nao implementado (esqueleto); contrato em crates/agentd/docs/spec.md");
-    std::process::exit(2);
+    if let Err((code, message)) = daemon::run(std::env::args().skip(1).collect()) {
+        eprintln!("agentd: {message}");
+        std::process::exit(code);
+    }
 }
