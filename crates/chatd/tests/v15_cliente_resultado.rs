@@ -493,7 +493,8 @@ fn c1_com_variaveis_da_v14_a_saida_e_igual_regressao_zero() {
     let (a, _srv) = amb_servidor();
     let sock = a.socket().display().to_string();
     // So o socket: sem --as/CHATD_AS e sem --profile, o cliente nao define identidade (fail-closed).
-    let so_socket = roda(&a, &["status"], &[("CHATD_SOCKET", sock.as_str())]);
+    // atualizado pela v1.6 (Esclarecimento 12): status nao exige identidade; o fail-closed vale para inbox.
+    let so_socket = roda(&a, &["inbox", "--json"], &[("CHATD_SOCKET", sock.as_str())]);
     assert_eq!(so_socket.code, Some(2), "so CHATD_SOCKET: {so_socket:?}");
     assert!(
         so_socket.stderr.contains("identidade nao definida"),
@@ -537,12 +538,40 @@ fn c1_com_variaveis_da_v14_a_saida_e_igual_regressao_zero() {
 
 // atualizado pela v1.6: default_profile e ignorado como fonte de identidade (regra A.5 revogada); sem
 // --as/--profile e sem variaveis, status e inbox saem 2 sem conectar.
+// atualizado pela v1.6 (Esclarecimento 12): inbox sem identidade sai 2 sem conectar; status nao exige identidade,
+// nao abre o token do default_profile (FIFO aqui) e nao sai 2 por falta de identidade. Sem daemon no teste:
+// o status cai no ENOENT/ECONNREFUSED (saida 4), e so se confere que o FIFO nao travou o processo.
 #[test]
 fn c2_default_profile_nao_fornece_mais_identidade_v16() {
     let a = Amb::novo();
-    grava_cfg(&a, &cfg_perfis(&a));
-    let _ = erro_sem_conectar(&a, &["status"], &[]);
-    let _ = erro_sem_conectar(&a, &["inbox", "--json"], &[]);
+    let tok = a.p().join("token-fifo-c2.tok");
+    let c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(tok.as_os_str())).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+    grava_cfg(
+        &a,
+        &json!({
+            "socket": a.socket().display().to_string(),
+            "state_dir": a.state().display().to_string(),
+            "default_profile": "claude",
+            "profiles": {"claude": {"as": A, "token_file": tok.display().to_string()}}
+        }),
+    );
+    let r = erro_sem_conectar(&a, &["inbox", "--json"], &[]);
+    assert!(
+        r.stderr.contains("identidade nao definida"),
+        "inbox sem identidade explicita: {r:?}"
+    );
+    let _ = fs::remove_file(a.socket());
+    let st = roda(&a, &["status"], &[]);
+    assert!(
+        st.code.is_some(),
+        "status travou: o cliente abriu o FIFO do token do default_profile"
+    );
+    assert_ne!(st.code, Some(2), "status nao exige identidade: {st:?}");
+    assert!(
+        !st.stderr.contains("identidade nao definida"),
+        "status nao deve reclamar de identidade: {st:?}"
+    );
 }
 
 // atualizado pela v1.6: o teste escolhe o perfil com --profile; default_profile sozinho nao define identidade.

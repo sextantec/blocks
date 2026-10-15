@@ -4,7 +4,74 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+// atualizado pela v1.6: os helpers `cli`/`cli_env` de common nao isolam HOME nem XDG_CONFIG_HOME e nao removem
+// as CHATD_* herdadas; o `client.json` real do dono (default_profile e socket) passava a valer nos filhos.
+// Estes helpers sombreiam os de common (item local tem precedencia sobre o glob): HOME e XDG_CONFIG_HOME
+// apontam para um diretorio temporario vazio e toda CHATD_* herdada e removida antes das do proprio teste.
+fn cli(args: &[&str]) -> Saida {
+    cli_env(args, &[], None)
+}
+
+fn cli_env(args: &[&str], envs: &[(&str, &str)], entrada: Option<&str>) -> Saida {
+    let casa = tmp();
+    let mut cmd = Command::new(BIN);
+    cmd.args(args);
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CHATD_") {
+            cmd.env_remove(&k);
+        }
+    }
+    cmd.env("HOME", casa.path())
+        .env("XDG_CONFIG_HOME", casa.path().join("xdg"))
+        .envs(envs.iter().copied())
+        .stdin(if entrada.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("executar chatd");
+    if let Some(t) = entrada {
+        let mut si = child.stdin.take().unwrap();
+        let _ = si.write_all(t.as_bytes());
+    }
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let h1 = thread::spawn(move || {
+        let mut b = String::new();
+        let _ = so.read_to_string(&mut b);
+        b
+    });
+    let h2 = thread::spawn(move || {
+        let mut b = String::new();
+        let _ = se.read_to_string(&mut b);
+        b
+    });
+    let fim = Instant::now() + Duration::from_secs(10);
+    let code = loop {
+        if let Ok(Some(st)) = child.try_wait() {
+            break st.code();
+        }
+        if Instant::now() >= fim {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    Saida {
+        code,
+        stdout: h1.join().unwrap(),
+        stderr: h2.join().unwrap(),
+    }
+}
 
 /// Uma unica linha JSON de stdout.
 fn json_linha(saida: &str) -> Value {
@@ -595,9 +662,10 @@ fn flag_socket_vence_o_ambiente() {
 
 #[test]
 fn socket_inexistente_nao_e_uso_incorreto() {
-    // AMBIGUO: a spec nao diz o codigo quando o socket resolvido nao responde; por "falha de execucao" lemos 1.
+    // atualizado pela v1.6 (Parte B, regra 1 e R2): socket inexistente, depois das repeticoes, sai 4 (daemon
+    // indisponivel). O objetivo do teste e so provar que nao e erro de uso (!= 2).
     let r = cli(&["status", "--socket", "/nonexistent-dir/nao-existe.sock"]);
-    assert_eq!(r.code, Some(1), "saida: {r:?}");
+    assert_eq!(r.code, Some(4), "saida: {r:?}");
 }
 
 // ---------- serve: linha de comando e configuracao ----------
