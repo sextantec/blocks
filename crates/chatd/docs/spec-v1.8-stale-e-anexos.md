@@ -117,7 +117,7 @@ Criar: temporario `O_EXCL` 0600 -> `fsync` -> `rename` para `blobs/<aa>/<id>` ->
 
 Origem: decisao do Jabbur "Pendencia 1: A" e consulta ao Opus e ao Astra (`docs/consulta-orquestrador-mensagens-nao-respondidas-2026-10-15.md` da bancada). Problema: um PEDIDO **aceito** e nunca respondido; no caso real o agente nao esquecera, **achou que nao podia** e nao tinha um jeito barato e permitido de dizer isso. **Mudanca de contrato publico e do daemon.** Entra junto com a Parte B, com **um unico reinicio**.
 
-> **Estado:** rascunho **rev2**. As duas revisoes concordaram em cortar o **hook de fim de turno** e a **nota livre do `bloqueado`**; esta rev2 assume os dois cortes. O corte do hook aguarda a confirmacao do Jabbur **[CONFIRMAR]**.
+> **Estado:** rascunho **rev2**. As duas revisoes concordaram em cortar o **hook de fim de turno** e a **nota livre do `bloqueado`**; esta rev2 assume os dois cortes. **Corte do hook CONFIRMADO pelo Jabbur ("Adie o hook", 2026-10-15 noite; A21).**
 
 ### Modelo
 - **`aceito` continua significando "recebi o texto"** (v1.4: `inbox --take`); o compromisso e sinalizado por `bloqueado` ou `resultado`.
@@ -152,5 +152,5 @@ Origem: decisao do Jabbur "Pendencia 1: A" e consulta ao Opus e ao Astra (`docs/
 - **C14** `show`: nota de `refused` impressa como dado nao confiavel, controles escapados; nunca aparece em `obligations`, alerta nem `--json` de lista.
 
 ### Fora desta versao (decisao dos revisores)
-- **Hook de fim de turno** (extensao `Stop`/`Notification`) **[CONFIRMAR o corte]**: ambos os revisores recomendaram adiar; ele traz execucao local, corrida entre duas sessoes do mesmo agente, reentrada e dependencia da sandbox, e o caso real foi "achou que nao podia", nao esquecimento. Desenho preservado para uma versao futura: nao bloqueante, fail-open com timeout curto e guarda de reentrada, argv fixo sem shell, so grava `bloqueado unknown` **uma vez por id** quando nunca houve bloqueio desde o aceite, e nunca repassa texto de mensagem; Codex so com ok do Jabbur em `/hooks`.
+- **Hook de fim de turno** (extensao `Stop`/`Notification`) **[ADIADO por decisao do Jabbur, A21]**: ambos os revisores recomendaram adiar; ele traz execucao local, corrida entre duas sessoes do mesmo agente, reentrada e dependencia da sandbox, e o caso real foi "achou que nao podia", nao esquecimento. Desenho preservado para uma versao futura: nao bloqueante, fail-open com timeout curto e guarda de reentrada, argv fixo sem shell, so grava `bloqueado unknown` **uma vez por id** quando nunca houve bloqueio desde o aceite, e nunca repassa texto de mensagem; Codex so com ok do Jabbur em `/hooks`.
 - Nota livre no `bloqueado`; heartbeat periodico; `last_progress_at` por agente (vem do `agentd`); renegociacao de prazo; reatribuicao automatica; bloquear o turno por hook.
