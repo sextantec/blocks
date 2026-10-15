@@ -1,0 +1,21 @@
+# Unit de usuario do chatd (systemd --user). Instalar com scripts/systemd/instala-unit.sh (revise antes).
+[Unit]
+Description=chatd: caixa de correio entre agentes (Claude e Codex)
+After=default.target
+
+[Service]
+Type=simple
+# Ajuste CHATD_HOME se o estado nao ficar em ~/.local/state/chatd.
+Environment=CHATD_HOME=%h/.local/state/chatd
+ExecStart=%h/.local/bin/chatd serve --state-dir ${CHATD_HOME}/state --config ${CHATD_HOME}/config.json --socket ${CHATD_HOME}/chatd.sock
+Restart=on-failure
+RestartSec=2
+# Endurecimento minimo, de proposito: a campainha chama o `herdr` (cliente que fala com o socket do herdr e
+# pode escrever no proprio estado), entao NAO usamos ProtectSystem nem PrivateNetwork. NAO TESTADO sob systemd:
+# depois de instalar, rode `chatd status` e um `chatd send` de teste; se a campainha falhar (`bell_failed` no
+# `chatd log`), veja o motivo antes de apertar o isolamento.
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

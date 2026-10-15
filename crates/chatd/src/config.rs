@@ -1,0 +1,117 @@
+//! Configuracao JSON estrita: campos desconhecidos sao recusados (spec v1 7 e v1.1 A).
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::protocol::valid_name;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// Campainha no painel `pane` (adaptador herdr).
+    Bell { pane: String },
+    /// Sem campainha: o agente usa `chatd watch`.
+    Watch,
+}
+
+impl Delivery {
+    pub fn is_bell(&self) -> bool {
+        matches!(self, Delivery::Bell { .. })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub auth_required: bool,
+    pub herdr_bin: String,
+    pub bell_poll_ms: u64,
+    pub bell_rearm_s: u64,
+    pub recipients: BTreeMap<String, Delivery>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Raw {
+    auth: Option<String>,
+    herdr_bin: Option<String>,
+    bell_poll_ms: Option<u64>,
+    bell_rearm_s: Option<u64>,
+    #[serde(default)]
+    recipients: BTreeMap<String, RawRecipient>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRecipient {
+    delivery: Option<String>,
+    pane: Option<String>,
+}
+
+pub fn load(path: &Path) -> Result<Config, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("config: nao li {}: {e}", path.display()))?;
+    parse(&text)
+}
+
+pub fn parse(text: &str) -> Result<Config, String> {
+    let raw: Raw = serde_json::from_str(text).map_err(|e| format!("config invalida: {e}"))?;
+    let auth_required = match raw.auth.as_deref() {
+        None | Some("required") => true,
+        Some("off") => false,
+        Some(_) => return Err("config: auth deve ser required ou off".to_string()),
+    };
+    let herdr_bin = raw.herdr_bin.unwrap_or_else(|| "herdr".to_string());
+    if herdr_bin.is_empty() || herdr_bin.contains('\0') {
+        return Err("config: herdr_bin invalido".to_string());
+    }
+    let bell_poll_ms = raw.bell_poll_ms.unwrap_or(5000);
+    if bell_poll_ms < 50 {
+        return Err("config: bell_poll_ms deve ser de no minimo 50".to_string());
+    }
+    let bell_rearm_s = raw.bell_rearm_s.unwrap_or(600);
+    if bell_rearm_s == 0 {
+        return Err("config: bell_rearm_s deve ser de no minimo 1".to_string());
+    }
+    let mut recipients = BTreeMap::new();
+    for (name, rec) in raw.recipients {
+        if !valid_name(&name) {
+            return Err(format!("config: nome de destinatario invalido '{name}'"));
+        }
+        let delivery = parse_delivery(&name, rec)?;
+        recipients.insert(name, delivery);
+    }
+    Ok(Config {
+        auth_required,
+        herdr_bin,
+        bell_poll_ms,
+        bell_rearm_s,
+        recipients,
+    })
+}
+
+fn parse_delivery(name: &str, rec: RawRecipient) -> Result<Delivery, String> {
+    match (rec.delivery.as_deref(), rec.pane) {
+        (Some("bell"), Some(pane)) if valid_pane(&pane) => Ok(Delivery::Bell { pane }),
+        (Some("bell"), _) => Err(format!(
+            "config: '{name}' com delivery bell exige pane valido"
+        )),
+        (Some("watch"), None) => Ok(Delivery::Watch),
+        (Some("watch"), Some(_)) => Err(format!(
+            "config: '{name}' com delivery watch nao aceita pane"
+        )),
+        (None, _) => Err(format!("config: '{name}' sem delivery (bell ou watch)")),
+        (Some(_), _) => Err(format!(
+            "config: delivery de '{name}' deve ser bell ou watch"
+        )),
+    }
+}
+
+/// Pane do herdr: 1 a 64 caracteres de `[A-Za-z0-9:._-]`, sem comecar por `-`.
+pub fn valid_pane(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'))
+}
