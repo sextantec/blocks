@@ -1,5 +1,8 @@
 # chatd v1.7: `chatd stale`, verificador de mensagens paradas (APROVADA pelo Jabbur em 2026-10-15)
 
+> **Substituida pela Parte A de `spec-v1.8-stale-e-anexos.md`**, que incorpora esta spec integral e a regra v1.7.1 ("aceita sem resultado"). Mantida como historico; os testes `tests/v17_stale.rs` continuam valendo.
+
+
 Origem: consulta de arquitetura de 2026-10-15 (Opus e Sol 6.1, `docs/consulta-arquitetura-despertar-2026-10-15.md` da bancada): D + E, sem `wakerd`. Decisao do Jabbur: canal de aviso **tmux**, mas "tmux nao pode ser implantado antes de termos o `agentd`, pois precisamos do herdr para funcionar". Contrato escrito pelo Sextante; implementacao pelo `codex-blocks`; testes independentes pelo Haiku. **Cliente puro: nao altera o daemon.**
 
 ## Problema (exemplo)
