@@ -22,8 +22,9 @@ Ja existe `scripts/systemd/instala-unit.sh` (primeira instalacao: estado, config
 5. **Teste de fumaca antes de tocar o instalado:** o novo binario precisa (a) listar o uso (`chatd` sem argumentos, saida nao vazia) e (b) **subir com uma copia da `config.json` real** em diretorio temporario (`serve --state-dir TMP/state --config TMP/config.json --socket TMP/s.sock`, socket em caminho curto) e escrever `chatd: ready` em ate 5 s; depois e encerrado e o temporario removido. Falha = saida 2, nada alterado.
 6. **Idempotencia:** se o sha256 do novo binario for igual ao instalado, imprime "ja instalado" e sai 0; **se** o processo em execucao tiver sha256 diferente do instalado, so reinicia o servico (nao copia).
 7. **Backup e troca atomica:** copia o binario atual para `PREFIX/chatd.AAAAMMDDTHHMMSSZ.bak` (0755); grava o novo em `PREFIX/chatd.new.PID` (`install -m 0755`) e `mv -f` sobre `PREFIX/chatd`. Poda os backups alem de `--keep` (so os que casam `chatd.*.bak`, os mais antigos).
-8. **Reinicio e verificacao:** `systemctl --user restart NOME` (a menos que `--no-restart`); espera ate `--wait` s pelo estado `active`; confere que `/proc/<MainPID>/exe` tem o sha256 do novo binario e que `chatd log --state-dir $CHATD_HOME/state --tail 1` responde (sem autenticar).
-9. **Reversao automatica:** falha em 8 (servico nao ativo no prazo, sha divergente ou log ilegivel) restaura o backup (`mv -f`), reinicia o servico, imprime o motivo e o comando `journalctl --user -u NOME -n 30 --no-pager`, e sai 1.
+8. **Reinicio e verificacao (com espera, nunca uma conferencia unica):** `systemctl --user restart NOME` (a menos que `--no-restart`). Depois, ate `--wait` s, em laco de 0,1 s, **ate que todas** valham: (a) o servico esta `active`; (b) `MainPID` e um inteiro positivo e `/proc/<MainPID>/exe` e legivel; (c) o sha256 de `/proc/<MainPID>/exe` e o do novo binario; (d) `chatd log --state-dir $CHATD_HOME/state --tail 1` responde (sem autenticar). `MainPID` zerado ou `/proc/<PID>/exe` ausente nos primeiros instantes sao **transitorios** (o processo ainda sobe) e **nao** disparam reversao; so o fim do prazo dispara. Cumpridas (a) a (d), exige **estabilidade**: o mesmo `MainPID` ainda `active` depois de 1 s.
+   *Motivo (achado em 2026-10-15):* o systemd registra `Started` e o processo leva ~25 ms ate escrever `chatd: ready`; uma conferencia unica 20 ms depois reverteu uma instalacao correta.
+9. **Reversao automatica:** estouro do prazo em 8, perda de estabilidade (processo morre ou muda de `MainPID` no 1 s) ou `restart` com falha: **antes** de reverter, captura `systemctl --user status NOME -n 40 --no-pager` e o imprime na saida de erro (o journal so guarda a invocacao atual e o erro do binario novo se perderia); restaura o backup (`mv -f`), reinicia o servico, imprime o motivo e `journalctl --user-unit NOME -n 30 --no-pager` (e `--user-unit`, nao `-u`), e sai 1.
 10. **Relatorio final:** commit, sha256 antes/depois, caminho do backup, estado do servico e o comando exato de reversao manual (`mv -f BACKUP PREFIX/chatd && systemctl --user restart NOME`). Lembrete: o script nao cria token, `client.json` nem muda a configuracao.
 11. **Saidas:** 0 ok ou "ja instalado"; 1 falhou apos reversao; 2 uso/pre-condicao/fumaca; 3 instalado com `--no-restart` (servico nao reiniciado).
 
@@ -38,6 +39,9 @@ Ja existe `scripts/systemd/instala-unit.sh` (primeira instalacao: estado, config
 - **I8**: `--no-restart` nao chama `systemctl restart` e sai 3.
 - **I9**: `--prefix` customizado; `--service` customizado.
 - **I10**: fumaca falha (binario falso que nao escreve `chatd: ready`) = saida 2 e nada alterado.
+- **I12** (espera): o `systemctl` falso devolve `MainPID=0` e `/proc` inexistente nas 3 primeiras consultas e so depois um PID valido com o sha novo: a instalacao **conclui** (saida 0), sem reversao.
+- **I13** (estabilidade): o servico fica `active` com PID valido e sha novo, mas **morre** 0,3 s depois: reversao (saida 1), binario antigo byte a byte, e a saida contem o `status -n 40` capturado antes de reverter.
+- **I14** (prazo): o PID e valido mas o sha nunca confere ate `--wait 2`: reversao (saida 1) so depois do prazo, nao na primeira consulta.
 - **I11**: `bash -n` passa e, se `shellcheck` existir, sem avisos.
 
 ## Fora de escopo
