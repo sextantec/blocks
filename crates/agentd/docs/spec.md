@@ -1,6 +1,6 @@
 # agentd v1: observador conservador do estado dos agentes (contrato testavel) | RASCUNHO rev3 (revisoes do codex-blocks, Opus e Sol 6.1 incorporadas, 2026-10-15)
 
-Origem (decisoes do Jabbur, 2026-10-15): "creio que devemos pensar em um outro daemon que faca o que o herdr e luvus fazem para ler o estado dos agentes"; **daemon** (nao CLI), codigo em `crates/agentd` do `blocks`, implementacao pelo `codex-blocks`; filosofia unix (uma tarefa, uma ferramenta). Estudo-base: `~/Projects/agentd/docs/estudo-2026-10-15.md`. Os testes falam com o **binario** e com o **protocolo no socket**, nunca com a API interna.
+Origem (decisoes do Jabbur, 2026-10-15): "creio que devemos pensar em um outro daemon que faca o que o herdr e luvus fazem para ler o estado dos agentes"; **daemon** (nao CLI), codigo em `crates/agentd` do `blocks`, implementacao pelo `codex-blocks`; filosofia unix (uma tarefa, uma ferramenta). Estudo-base: repositorio privado `agentd` (`docs/estudo-2026-10-15.md`). Os testes falam com o **binario** e com o **protocolo no socket**, nunca com a API interna.
 
 ## 0. O que a v1 e, e o que NAO e (leia primeiro)
 A v1 e um **observador conservador**: publica o estado que o herdr relata, com a evidencia e a frescura, e na duvida diz `unknown`. **Nao e uma autorizacao segura de digitacao.** Duas revisoes independentes (Opus 5.5 e Sol 6.1) mostraram, e esta spec aceita, que:
