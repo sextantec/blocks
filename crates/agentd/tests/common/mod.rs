@@ -151,9 +151,11 @@ pub fn sobe_com(state: &Path, cfg: &Path, extra: &[&str]) -> Servidor {
         .expect("executar o binario agentd");
     let out = child.stdout.take().unwrap();
     let errp = child.stderr.take().unwrap();
-    thread::spawn(move || {
-        for _ in BufReader::new(out).lines().map_while(Result::ok) {}
-    });
+    thread::spawn(
+        move || {
+            for _ in BufReader::new(out).lines().map_while(Result::ok) {}
+        },
+    );
     let err = Arc::new(Mutex::new(String::new()));
     let err2 = Arc::clone(&err);
     thread::spawn(move || {
@@ -177,10 +179,16 @@ pub fn sobe_com(state: &Path, cfg: &Path, extra: &[&str]) -> Servidor {
             break;
         }
         if !srv.viva() {
-            panic!("agentd saiu antes de aceitar conexao; stderr: {}", srv.stderr());
+            panic!(
+                "agentd saiu antes de aceitar conexao; stderr: {}",
+                srv.stderr()
+            );
         }
         if Instant::now() >= fim {
-            panic!("agentd nao aceitou conexao em 10 s; stderr: {}", srv.stderr());
+            panic!(
+                "agentd nao aceitou conexao em 10 s; stderr: {}",
+                srv.stderr()
+            );
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -396,7 +404,12 @@ pub fn status(socket: &Path) -> Value {
 }
 
 /// Espera ate `cond(agente)` ser verdadeiro, lendo agent.get a cada 20 ms.
-pub fn espera_agente(socket: &Path, id: &str, d: Duration, mut cond: impl FnMut(&Value) -> bool) -> Value {
+pub fn espera_agente(
+    socket: &Path,
+    id: &str,
+    d: Duration,
+    mut cond: impl FnMut(&Value) -> bool,
+) -> Value {
     let fim = Instant::now() + d;
     loop {
         let a = agente(socket, id);
