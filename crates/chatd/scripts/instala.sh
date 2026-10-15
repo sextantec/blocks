@@ -139,7 +139,9 @@ if ((dry_run)); then
 fi
 
 if ((yes == 0)); then
-    read -r -p 'Continuar? [s/N] ' answer
+    if ! read -r -p 'Continuar? [s/N] ' answer; then
+        fail_precondition 'cancelado'
+    fi
     [[ "$answer" == 's' || "$answer" == 'S' ]] || fail_precondition 'cancelado'
 fi
 
@@ -189,15 +191,19 @@ fi
 kill "$smoke_pid" 2>/dev/null || true
 wait "$smoke_pid" 2>/dev/null || true
 smoke_pid=''
-rm -rf -- "$tmp"
-trap - EXIT
 
 backup=''
+rollback_source=''
 if [[ "$new_sha" == "$installed_sha" ]]; then
     if ((service_running)) && [[ "$running_sha" != "$installed_sha" ]]; then
         if ((no_restart)); then
             printf 'ja instalado; processo divergente nao reiniciado por --no-restart\n'
             exit 3
+        fi
+        if [[ "$running_sha" != '-' && -r "/proc/$current_pid/exe" ]]; then
+            rollback_source="$tmp/rollback-chatd"
+            install -m 0755 -- "/proc/$current_pid/exe" "$rollback_source" ||
+                fail_precondition 'nao preservei o binario do processo para uma eventual reversao'
         fi
         printf 'ja instalado; processo em execucao divergente, reiniciando o servico\n'
     else
@@ -243,35 +249,53 @@ fi
 rollback() {
     local reason=$1
     printf 'instala.sh: %s; revertendo\n' "$reason" >&2
+    systemctl --user status "$service" -n 40 --no-pager >&2 || true
     if [[ -n "$backup" && -f "$backup" ]]; then
         mv -f -- "$backup" "$installed" || printf 'instala.sh: falha ao restaurar backup %s\n' "$backup" >&2
+    elif [[ -n "$rollback_source" && -f "$rollback_source" ]]; then
+        local restore_temp="$prefix/chatd.rollback.$$"
+        if install -m 0755 -- "$rollback_source" "$restore_temp" &&
+            mv -f -- "$restore_temp" "$installed"; then
+            :
+        else
+            rm -f -- "$restore_temp"
+            printf 'instala.sh: falha ao restaurar a imagem anterior do processo\n' >&2
+        fi
     fi
     systemctl --user restart "$service" >/dev/null 2>&1 || true
-    printf 'diagnostico: journalctl --user -u %s -n 30 --no-pager\n' "$service" >&2
+    printf 'diagnostico: journalctl --user-unit %s -n 30 --no-pager\n' "$service" >&2
     exit 1
 }
 
 if ! systemctl --user restart "$service"; then
     rollback 'restart do servico falhou'
 fi
-active=0
-for ((tick = 0; tick < wait_seconds * 10; tick++)); do
-    if systemctl --user is-active --quiet "$service"; then
-        active=1
-        break
+validated_pid=''
+for ((tick = 0; tick <= wait_seconds * 10; tick++)); do
+    active_now=0
+    systemctl --user is-active --quiet "$service" && active_now=1
+    candidate_pid=$(systemctl --user show --property=MainPID --value "$service" 2>/dev/null || true)
+    if ((active_now)) && [[ "$candidate_pid" =~ ^[1-9][0-9]*$ && -r "/proc/$candidate_pid/exe" ]]; then
+        candidate_sha=$(sha256sum -- "/proc/$candidate_pid/exe" 2>/dev/null | awk '{print $1}') || candidate_sha=''
+        if [[ "$candidate_sha" == "$new_sha" ]] && \
+            env -u CHATD_CONFIG XDG_CONFIG_HOME="$tmp/no-xdg" "$installed" log \
+                --state-dir "$daemon_home/state" --tail 1 >/dev/null 2>&1; then
+            validated_pid=$candidate_pid
+            break
+        fi
     fi
-    sleep 0.1
+    if ((tick < wait_seconds * 10)); then
+        sleep 0.1
+    fi
 done
-((active)) || rollback "servico nao ficou active em ${wait_seconds}s"
+[[ -n "$validated_pid" ]] || rollback "servico nao ficou pronto em ${wait_seconds}s"
 
-new_pid=$(systemctl --user show --property=MainPID --value "$service" 2>/dev/null || true)
-[[ "$new_pid" =~ ^[1-9][0-9]*$ && -e "/proc/$new_pid/exe" ]] || rollback 'MainPID do servico invalido'
-process_sha=$(sha256sum -- "/proc/$new_pid/exe" 2>/dev/null | awk '{print $1}') || rollback 'nao calculei sha256 do processo'
-[[ "$process_sha" == "$new_sha" ]] || rollback 'sha256 de /proc/MainPID/exe diverge do binario novo'
-
-if ! env -u CHATD_CONFIG XDG_CONFIG_HOME="$tmp/no-xdg" "$installed" log --state-dir "$daemon_home/state" --tail 1 >/dev/null 2>&1; then
-    rollback 'chatd log nao respondeu depois do reinicio'
+sleep 1
+if ! systemctl --user is-active --quiet "$service"; then
+    rollback 'servico perdeu active durante a verificacao de estabilidade'
 fi
+stable_pid=$(systemctl --user show --property=MainPID --value "$service" 2>/dev/null || true)
+[[ "$stable_pid" == "$validated_pid" ]] || rollback 'MainPID mudou durante a verificacao de estabilidade'
 
 if [[ -n "$backup" ]]; then
     mapfile -t old_backups < <(find "$prefix" -maxdepth 1 -type f -name 'chatd.*.bak' -printf '%f\n' | sort -r | tail -n "+$((keep + 1))")
