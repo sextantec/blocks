@@ -51,4 +51,4 @@ O daemon leva ~30 a 50 ms para voltar numa troca de binario; um `chatd send` nes
 3. **R1b:** apos a requisicao ter sido enviada e a conexao cair sem resposta, o cliente **nao repete** e sai com codigo **4**, imprimindo o `id` da mensagem para reconciliar por `chatd show --id`.
 4. **R2:** as 4 tentativas (1 + 3 repeticoes) sao contadas pelo falso; o tempo total e >= 1,2 s e <= 3 s.
 5. **R4:** o aviso de reconexao do `watch` e uma linha em stderr que **comeca com `aviso: reconectando`**; a linha do `watch` e a da v1.2 (inalterada).
-
+6. **Backoff do `watch` e a flag `--reconnect` da v1.2 (pergunta do codex-blocks, seq 253):** o padrao **sem** `--reconnect` passa a ser o da Parte B (200 ms ate 5 s, exponencial); **com** `--reconnect` fica **exatamente** o comportamento da v1.2 (1, 2, 4 ... 30 s), para manter a regressao zero. Se algum teste da v1.2 fixar o intervalo de 1 s **sem** a flag, o implementador diz qual e eu decido (mudanca de tempo interno, sem mudar contrato publico).
