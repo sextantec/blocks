@@ -15,3 +15,5 @@ Regra 5 do `AGENTS.md`: autorizacao e do Jabbur e fica registrada em `pendencias
 
 | A7 | **Troca do codigo de saida "daemon indisponivel" de 1 para 4** nos clientes `send`, `inbox`, `ack`, `show`, `status`, `watch` (o `bind` ja saia 4), mais o codigo 5 para permissao negada. Mudanca de contrato publico da v1.6 | "1: OK" (resposta ao item 1: autorizar o codigo de saida 4) | 2026-10-15 noite, conversa do Claude Code |
 | A8 | **Commits e push do `blocks`** | "7. Autorizado os commits e push" | 2026-10-15 noite, conversa do Claude Code |
+| A9 | **Instalar a v1.6 e a Parte A (`chatd stale`) sem reiniciar o daemon** (`instala.sh --no-restart`), quando a v1.7 estiver comitada e verde; o reinicio fica para a Parte B. O Sextante **prepara** o comando; quem o executa e o Jabbur | "De acordo com a sua recomendacao" (opcao A da pendencia 3) | 2026-10-15 noite, conversa do Claude Code |
+| A10 | **Numeracao:** pacote `0.2.0` inalterado; `v1.x` nomeia iteracoes de spec; 1.0 reservada para algo muito estavel | "Se a versao do pacote e 0.2.0, estou tranquilo e nao mudamos nada" | 2026-10-15 noite, conversa do Claude Code |
