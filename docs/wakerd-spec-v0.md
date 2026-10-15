@@ -1,4 +1,8 @@
-# wakerd v0: despertar de agentes (RASCUNHO; decisao do Jabbur em 2026-10-15: "P-75: De acordo")
+# wakerd v0: despertar de agentes (ARQUIVADO em 2026-10-15: nao implementar)
+
+> **Arquivado por decisao do Jabbur (2026-10-15, "P75a: Confirmado")** depois da consulta Opus + Sol 6.1 (`docs/consulta-arquitetura-despertar-2026-10-15.md` da bancada): adotada a combinacao D + E, sem daemon novo; o verificador e `chatd stale` (`crates/chatd/docs/spec-v1.7-stale.md`). Mantido so como registro. A regra (e) `allowed_senders` deste rascunho e impossivel pela ACL do `events.resume`.
+
+(Texto original abaixo.)
 
 Estado: **rascunho de conceito**, escrito antes de o daemon do `agentd` existir. Nao implementar antes de: (1) spec do `agentd` revisada, (2) `agentd` v1 com testes independentes. Linguagem: Rust, no workspace `blocks` (decisao do Jabbur). Autor: Sextante (Claude Sonnet 5.5).
 

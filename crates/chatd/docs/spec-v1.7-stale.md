@@ -1,4 +1,4 @@
-# chatd v1.7: `chatd stale`, verificador de mensagens paradas (RASCUNHO para decisao)
+# chatd v1.7: `chatd stale`, verificador de mensagens paradas (APROVADA pelo Jabbur em 2026-10-15)
 
 Origem: consulta de arquitetura de 2026-10-15 (Opus e Sol 6.1, `docs/consulta-arquitetura-despertar-2026-10-15.md` da bancada): D + E, sem `wakerd`. Decisao do Jabbur: canal de aviso **tmux**, mas "tmux nao pode ser implantado antes de termos o `agentd`, pois precisamos do herdr para funcionar". Contrato escrito pelo Sextante; implementacao pelo `codex-blocks`; testes independentes pelo Haiku. **Cliente puro: nao altera o daemon.**
 
@@ -25,3 +25,6 @@ O `status` autenticado devolve **so a entrada da propria identidade** (`store.rs
 
 ## Fora desta versao
 `watch_active` (o estado do `watch` so existe em memoria; exige o daemon), idade por mensagem pelo `status`, sink `tmux`, acordar o Claude por `claude --resume` (so depois de duas semanas medindo e com teto decidido pelo Jabbur).
+
+## Nota de seguranca da implementacao
+Os eventos `registered` do `log.jsonl` carregam `subject` e `body` completos. O verificador le esses campos como parte da linha, mas **nunca** os copia para saida, `stamp-file`, mensagem de erro nem contador (S6). Parsear so `type`, `ts`, `seq`, `id`, `from`, `to` e `recipient`; descartar o resto sem armazenar.
