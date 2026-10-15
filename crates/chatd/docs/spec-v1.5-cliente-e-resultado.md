@@ -15,7 +15,7 @@ O Jabbur abre um terminal e roda `chatd status`: erro de uso, porque o cliente e
 5. **Perfil:** `--profile NOME` ou `CHATD_PROFILE`; sem eles, `default_profile`; sem nenhum, a configuracao nao fornece identidade (identidade vem de flag/ambiente, como hoje). Perfil inexistente = erro de uso (saida 2). O perfil fornece `as` e `token_file`; `--as`/`CHATD_AS` e `--token-file`/`CHATD_TOKEN_FILE` continuam prevalecendo.
 6. **Quem le o arquivo:** os clientes (`send`, `inbox`, `ack`, `watch`, `show`, `bind`, `status`) e `log` (so `state_dir`). **`chatd serve` e `chatd token` nao leem** o arquivo do cliente (o servidor tem a configuracao dele).
 7. **Nenhuma escrita:** o cliente nunca cria, altera nem remove o arquivo.
-8. **`chatd whoami [--profile P] [--json]`** (novo): imprime a resolucao final, sem conectar ao daemon e **sem nunca imprimir token**: `as`, `socket`, `state_dir`, `token_file` (caminho), `profile` e a **origem** de cada valor (`flag`, `env`, `config` ou `-`). Saida 0 se resolveu pelo menos socket; 2 caso contrario (com o que falta).
+8. **`chatd whoami [--as N] [--socket P] [--state-dir D] [--token-file F] [--profile P] [--json]`** (novo; aceita as mesmas flags de identidade dos demais clientes): imprime a resolucao final, sem conectar ao daemon e **sem nunca imprimir token**. Sem `--json`, uma linha por campo, nesta ordem e formato fixo: `as=<valor> (<origem>)`, `socket=<valor> (<origem>)`, `state_dir=<valor> (<origem>)`, `token_file=<valor> (<origem>)`, `profile=<valor> (<origem>)`; campo nao resolvido: `<campo>=- (-)`. Com `--json`, uma linha: `{"as":V|null,"socket":V|null,"state_dir":V|null,"token_file":V|null,"profile":V|null,"sources":{"as":O,"socket":O,"state_dir":O,"token_file":O,"profile":O}}`, com `O` em `"flag"`, `"env"`, `"config"` ou `"-"`. `~/` ja vem expandido. Saida 0 se resolveu pelo menos o socket; 2 caso contrario (a mensagem diz o que falta).
 
 ### Contrato testavel (Parte A)
 - **C1**: sem arquivo e sem variaveis: erro de uso como na v1.4 (mensagem conhecida). Com as variaveis da v1.4: tudo igual (regressao zero).
@@ -39,7 +39,7 @@ Hoje o recibo `resultado` depende de o agente lembrar de rodar `chatd ack --stag
 4. **Idempotencia:** reenvio da mesma resposta (`duplicate:true`) nao grava novo `resulted`.
 5. So `RESPOSTA`: `AVISO`, `PEDIDO`, `PERGUNTA` e `ACK` nao fecham nada. `thread` de terceiros (reply.to != M.from) nao fecha.
 6. **Opt-out:** `chatd send ... --keep-open` (parametro `keep_open: true` em `message.send`, fora do hash de idempotencia): nao fecha. Sem a opcao, fecha.
-7. A resposta de `message.send` ganha `closed` (id de M ou `null`); `send --json` o imprime; sem `--json` a saida nao muda.
+7. A resposta de `message.send` ganha `closed` (id de M ou `null`); `send --json` o imprime; sem `--json` a saida nao muda. **Reenvio idempotente** (`duplicate:true`): `closed` repete o valor do primeiro envio (o id de M se aquele envio fechou M, senao `null`), derivado do log; nunca grava novo `resulted`.
 8. Visibilidade: o evento `resulted` automatico chega a M.from e M.to como qualquer `resulted` (com `watch --receipts` da v1.4 o remetente ve `RECIBO SEQ ID resultado:done TO`). Releitura do log aceita `resulted` com essa `note`.
 
 ### Contrato testavel (Parte B)

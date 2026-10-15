@@ -591,13 +591,14 @@ fn dispatch(
             let from = protocol::resolve(sp.from.clone(), who, "/from")?;
             protocol::check_name(&from, "/from")?;
             protocol::check_name(&sp.to, "/to")?;
-            let (m, dup) = lock(&shared.store).send(&from, &sp)?;
+            let (m, dup, closed) = lock(&shared.store).send(&from, &sp)?;
             Ok(json!({
                 "v": 1,
                 "id": m.id,
                 "seq": m.seq,
                 "state": m.state.as_str(),
                 "duplicate": dup,
+                "closed": closed,
                 "registered_at": m.registered_at,
             }))
         }

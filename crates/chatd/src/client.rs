@@ -1,9 +1,10 @@
 //! Subcomandos do cliente: `send`, `inbox`, `ack`, `status`, `watch` e `log` (spec v1 4 e v1.1 D).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::ops::Deref;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,13 +14,182 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 
 use crate::protocol::valid_name;
-use crate::{Failure, Opts, env_path, parse_opts, usage};
+use crate::{Failure, Opts, parse_opts, usage};
 
 const SOCKET_OPTS: [&str; 3] = ["socket", "state-dir", "token-file"];
 const RPC_DEADLINE: Duration = Duration::from_secs(30);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const HEARTBEAT: Duration = Duration::from_secs(5);
 const BIND_KEEPALIVE: Duration = Duration::from_secs(25);
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientFile {
+    socket: Option<String>,
+    state_dir: Option<String>,
+    default_profile: Option<String>,
+    profiles: Option<BTreeMap<String, Profile>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Profile {
+    #[serde(rename = "as")]
+    identity: String,
+    token_file: String,
+}
+
+struct ClientOpts {
+    raw: Opts,
+    file: ClientFile,
+    profile: Option<String>,
+    profile_source: &'static str,
+}
+
+impl Deref for ClientOpts {
+    type Target = Opts;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl ClientOpts {
+    fn profile(&self) -> Option<&Profile> {
+        self.profile
+            .as_deref()
+            .and_then(|name| self.file.profiles.as_ref()?.get(name))
+    }
+}
+
+fn client_opts(args: &[String], values: &[&str], bools: &[&str]) -> Result<ClientOpts, Failure> {
+    let mut values = values.to_vec();
+    values.push("profile");
+    let raw = parse_opts(args, &values, bools)?;
+    let file = load_client_file()?;
+    let (profile, profile_source) = if let Some(name) = raw.get("profile") {
+        (Some(name.to_string()), "flag")
+    } else if let Some(name) = env_value("CHATD_PROFILE") {
+        (Some(name), "env")
+    } else if let Some(name) = &file.default_profile {
+        (Some(name.clone()), "config")
+    } else {
+        (None, "-")
+    };
+    if let Some(name) = &profile {
+        if !valid_name(name) {
+            return Err(usage("nome de perfil invalido"));
+        }
+        if file
+            .profiles
+            .as_ref()
+            .and_then(|profiles| profiles.get(name))
+            .is_none()
+        {
+            return Err(usage(format!(
+                "perfil '{name}' nao existe na configuracao do cliente"
+            )));
+        }
+    }
+    Ok(ClientOpts {
+        raw,
+        file,
+        profile,
+        profile_source,
+    })
+}
+
+fn load_client_file() -> Result<ClientFile, Failure> {
+    let explicit = std::env::var_os("CHATD_CONFIG");
+    let explicit_set = explicit.is_some();
+    let path = if let Some(path) = explicit.as_ref() {
+        if path.is_empty() {
+            return Err(usage("CHATD_CONFIG vazio"));
+        }
+        Some(PathBuf::from(path))
+    } else if let Some(root) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(PathBuf::from(root).join("chatd/client.json"))
+    } else {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(|home| PathBuf::from(home).join(".config/chatd/client.json"))
+    };
+    let Some(path) = path else {
+        return Ok(ClientFile::default());
+    };
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !explicit_set => {
+            return Ok(ClientFile::default());
+        }
+        Err(_) => return Err(usage("nao foi possivel ler a configuracao do cliente")),
+    };
+    // SAFETY: geteuid does not dereference pointers or change process state.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != uid
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(usage(
+            "configuracao do cliente deve ser arquivo regular, do usuario e nao gravavel por grupo/outros",
+        ));
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|_| usage("nao foi possivel ler a configuracao do cliente"))?;
+    let file: ClientFile =
+        serde_json::from_str(&text).map_err(|_| usage("configuracao do cliente invalida"))?;
+    validate_client_file(&file)?;
+    Ok(file)
+}
+
+fn validate_client_file(file: &ClientFile) -> Result<(), Failure> {
+    for path in [file.socket.as_deref(), file.state_dir.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if !valid_config_path(path) {
+            return Err(usage("caminho invalido na configuracao do cliente"));
+        }
+    }
+    if let Some(name) = &file.default_profile
+        && (!valid_name(name)
+            || file
+                .profiles
+                .as_ref()
+                .and_then(|profiles| profiles.get(name))
+                .is_none())
+    {
+        return Err(usage("default_profile inexistente ou invalido"));
+    }
+    if let Some(profiles) = &file.profiles {
+        for (name, profile) in profiles {
+            if !valid_name(name)
+                || !valid_name(&profile.identity)
+                || !valid_config_path(&profile.token_file)
+            {
+                return Err(usage("perfil invalido na configuracao do cliente"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_config_path(value: &str) -> bool {
+    !value.is_empty() && !value.contains('\0')
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn expand_home(value: &str) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty())
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(value)
+}
 
 /// Erro de uma chamada: falha de transporte ou erro devolvido pelo servidor.
 pub enum Rpc {
@@ -157,17 +327,21 @@ impl Session {
 }
 
 /// Resolve o socket: --socket, CHATD_SOCKET, depois <state-dir>/chatd.sock (flag ou CHATD_STATE_DIR).
-fn socket_path(o: &Opts) -> Result<PathBuf, Failure> {
+fn socket_path(o: &ClientOpts) -> Result<PathBuf, Failure> {
     if let Some(s) = o.get("socket") {
-        return Ok(PathBuf::from(s));
+        return Ok(expand_home(s));
     }
-    if let Some(s) = env_path("CHATD_SOCKET") {
-        return Ok(s);
+    if let Some(s) = env_value("CHATD_SOCKET") {
+        return Ok(expand_home(&s));
+    }
+    if let Some(s) = o.file.socket.as_deref() {
+        return Ok(expand_home(s));
     }
     let dir = o
         .get("state-dir")
-        .map(PathBuf::from)
-        .or_else(|| env_path("CHATD_STATE_DIR"));
+        .map(expand_home)
+        .or_else(|| env_value("CHATD_STATE_DIR").map(|s| expand_home(&s)))
+        .or_else(|| o.file.state_dir.as_deref().map(expand_home));
     match dir {
         Some(d) => Ok(d.join("chatd.sock")),
         None => Err(usage(
@@ -177,11 +351,12 @@ fn socket_path(o: &Opts) -> Result<PathBuf, Failure> {
 }
 
 /// Identidade: a flag vence `CHATD_AS`. Nome fora do formato e erro de uso.
-fn identity(o: &Opts, flag: &str) -> Result<Option<String>, Failure> {
+fn identity(o: &ClientOpts, flag: &str) -> Result<Option<String>, Failure> {
     let raw = o
         .get(flag)
         .map(str::to_string)
-        .or_else(|| std::env::var("CHATD_AS").ok().filter(|s| !s.is_empty()));
+        .or_else(|| env_value("CHATD_AS"))
+        .or_else(|| o.profile().map(|p| p.identity.clone()));
     match raw {
         Some(n) if valid_name(&n) => Ok(Some(n)),
         Some(_) => Err(usage("nome de agente invalido")),
@@ -199,11 +374,12 @@ fn auth_name(name: Option<&str>) -> Option<String> {
 }
 
 /// Token: --token-file vence CHATD_TOKEN_FILE. O conteudo nunca e impresso.
-fn token(o: &Opts) -> Result<Option<String>, Failure> {
+fn token(o: &ClientOpts) -> Result<Option<String>, Failure> {
     let path = o
         .get("token-file")
-        .map(PathBuf::from)
-        .or_else(|| env_path("CHATD_TOKEN_FILE"));
+        .map(expand_home)
+        .or_else(|| env_value("CHATD_TOKEN_FILE").map(|s| expand_home(&s)))
+        .or_else(|| o.profile().map(|p| expand_home(&p.token_file)));
     let Some(path) = path else {
         return Ok(None);
     };
@@ -217,7 +393,7 @@ fn token(o: &Opts) -> Result<Option<String>, Failure> {
 }
 
 /// Abre a sessao; com token, faz o `auth` antes de qualquer metodo.
-fn open(o: &Opts, name: Option<&str>) -> Result<Session, Failure> {
+fn open(o: &ClientOpts, name: Option<&str>) -> Result<Session, Failure> {
     let socket = socket_path(o)?;
     let tok = token(o)?;
     let who = auth_name(name);
@@ -302,7 +478,7 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
         "id",
         "ref",
     ]);
-    let o = parse_opts(args, &vals, &["json"])?;
+    let o = client_opts(args, &vals, &["json", "keep-open"])?;
     let from = identity(&o, "from")?;
     let from_name = need(&from, "send")?.to_string();
     let body = match (o.get("body"), o.get("body-file")) {
@@ -350,6 +526,9 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
     if !refs.is_empty() {
         params.insert("refs".into(), Value::Array(refs));
     }
+    if o.flag("keep-open") {
+        params.insert("keep_open".into(), json!(true));
+    }
     let mut s = open(&o, Some(from_name.as_str()))?;
     let r = s
         .call("message.send", Value::Object(params))
@@ -357,7 +536,7 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
     if o.flag("json") {
         println!(
             "{}",
-            json!({"id": r["id"], "seq": r["seq"], "state": r["state"], "duplicate": r["duplicate"]})
+            json!({"id": r["id"], "seq": r["seq"], "state": r["state"], "duplicate": r["duplicate"], "closed": r["closed"]})
         );
     } else if r["duplicate"] == json!(true) {
         println!("{} {} dup", txt(&r["id"]), txt(&r["seq"]));
@@ -370,7 +549,7 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
 pub fn inbox(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "after"]);
-    let o = parse_opts(args, &vals, &["all", "take", "ids", "json"])?;
+    let o = client_opts(args, &vals, &["all", "take", "ids", "json"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "inbox")?.to_string();
     let take = o.flag("take");
@@ -427,7 +606,7 @@ fn print_msgs(msgs: &[Value], o: &Opts) {
 pub fn ack(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["id", "as", "stage", "result", "note"]);
-    let o = parse_opts(args, &vals, &[])?;
+    let o = client_opts(args, &vals, &[])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "ack")?.to_string();
     let stage = o.req("stage")?;
@@ -458,7 +637,7 @@ pub fn ack(args: &[String]) -> Result<(), Failure> {
 pub fn status(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.push("as");
-    let o = parse_opts(args, &vals, &["json"])?;
+    let o = client_opts(args, &vals, &["json"])?;
     let name = identity(&o, "as")?;
     let mut s = open(&o, name.as_deref())?;
     let r = s.call("status", json!({"v": 1})).map_err(rpc_fail)?;
@@ -488,7 +667,7 @@ fn bind_rpc_fail(e: Rpc) -> Failure {
 pub fn bind(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "mux", "pane"]);
-    let o = parse_opts(args, &vals, &["keepalive"])?;
+    let o = client_opts(args, &vals, &["keepalive"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "bind")?.to_string();
     if let Some(env_name) = std::env::var("CHATD_AS").ok().filter(|s| !s.is_empty())
@@ -681,7 +860,7 @@ fn sleep_or_stop(d: Duration, stop: &AtomicBool, deadline: Option<Instant>) -> b
 pub fn watch(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "resume-file", "exit-after", "heartbeat-file"]);
-    let o = parse_opts(args, &vals, &["from-start", "reconnect", "receipts"])?;
+    let o = client_opts(args, &vals, &["from-start", "reconnect", "receipts"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "watch")?.to_string();
     let socket = socket_path(&o)?;
@@ -901,7 +1080,7 @@ fn print_receipt(ev: &Value, seq: u64, st: &WatchState, out: &mut impl Write) {
 pub fn show(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "id"]);
-    let o = parse_opts(args, &vals, &["json"])?;
+    let o = client_opts(args, &vals, &["json"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "show")?.to_string();
     let mut s = open(&o, Some(&name))?;
@@ -952,13 +1131,89 @@ fn write_heartbeat(st: &WatchState) -> Result<(), WatchErr> {
     Ok(())
 }
 
+/// Exibe a resolucao local do cliente sem conectar ao daemon ou revelar o token.
+pub fn whoami(args: &[String]) -> Result<(), Failure> {
+    let mut values = SOCKET_OPTS.to_vec();
+    values.push("as");
+    let o = client_opts(args, &values, &["json"])?;
+    let identity = identity(&o, "as")?;
+    let (state_dir, state_source) = if let Some(value) = o.get("state-dir") {
+        (Some(expand_home(value)), "flag")
+    } else if let Some(value) = env_value("CHATD_STATE_DIR") {
+        (Some(expand_home(&value)), "env")
+    } else if let Some(value) = o.file.state_dir.as_deref() {
+        (Some(expand_home(value)), "config")
+    } else {
+        (None, "-")
+    };
+    let (socket, socket_source) = if let Some(value) = o.get("socket") {
+        (Some(expand_home(value)), "flag")
+    } else if let Some(value) = env_value("CHATD_SOCKET") {
+        (Some(expand_home(&value)), "env")
+    } else if let Some(value) = o.file.socket.as_deref() {
+        (Some(expand_home(value)), "config")
+    } else if let Some(dir) = &state_dir {
+        (Some(dir.join("chatd.sock")), state_source)
+    } else {
+        (None, "-")
+    };
+    let has_socket = socket.is_some();
+    let (token_file, token_source) = if let Some(value) = o.get("token-file") {
+        (Some(expand_home(value)), "flag")
+    } else if let Some(value) = env_value("CHATD_TOKEN_FILE") {
+        (Some(expand_home(&value)), "env")
+    } else if let Some(profile) = o.profile() {
+        (Some(expand_home(&profile.token_file)), "config")
+    } else {
+        (None, "-")
+    };
+    let as_source = if o.get("as").is_some() {
+        "flag"
+    } else if env_value("CHATD_AS").is_some() {
+        "env"
+    } else if o.profile().is_some() {
+        "config"
+    } else {
+        "-"
+    };
+    let field = |value: Option<String>| value.map(Value::String).unwrap_or(Value::Null);
+    let output = json!({
+        "as": field(identity),
+        "socket": field(socket.map(|p| p.display().to_string())),
+        "state_dir": field(state_dir.map(|p| p.display().to_string())),
+        "token_file": field(token_file.map(|p| p.display().to_string())),
+        "profile": field(o.profile.clone()),
+        "sources": {
+            "as": as_source, "socket": socket_source, "state_dir": state_source,
+            "token_file": token_source, "profile": o.profile_source,
+        },
+    });
+    if o.flag("json") {
+        println!("{output}");
+    } else {
+        for key in ["as", "socket", "state_dir", "token_file", "profile"] {
+            let source = output["sources"][key].as_str().unwrap_or("-");
+            let value = txt(&output[key]);
+            println!("{key}={value} ({source})");
+        }
+    }
+    if !has_socket {
+        return Err(Failure::Bad(
+            "whoami: socket ausente; informe --socket, CHATD_SOCKET, state_dir ou configuracao"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// `chatd log --state-dir D [--tail N]`: le o log direto, sem socket (v1.1 D).
 pub fn log(args: &[String]) -> Result<(), Failure> {
-    let o = parse_opts(args, &["state-dir", "tail"], &[])?;
+    let o = client_opts(args, &["state-dir", "tail"], &[])?;
     let dir = o
         .get("state-dir")
-        .map(PathBuf::from)
-        .or_else(|| env_path("CHATD_STATE_DIR"))
+        .map(expand_home)
+        .or_else(|| env_value("CHATD_STATE_DIR").map(|s| expand_home(&s)))
+        .or_else(|| o.file.state_dir.as_deref().map(expand_home))
         .ok_or_else(|| usage("log exige --state-dir ou CHATD_STATE_DIR"))?;
     let tail: Option<usize> = match o.get("tail") {
         Some(n) => Some(n.parse().map_err(|_| usage("--tail deve ser inteiro"))?),

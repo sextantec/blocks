@@ -134,13 +134,24 @@ M = [
  ("W07","src/client.rs","const HEARTBEAT: Duration = Duration::from_secs(5);","const HEARTBEAT: Duration = Duration::from_secs(60);","heartbeat a cada 60 s"),
  ("W08","src/client.rs","st.backoff = if w >= 16 { 30 } else { w * 2 };","st.backoff = if w >= 16 { 30 } else { w * 3 };","backoff triplica"),
  ("W09","src/client.rs","let start = if st.from_start { 0 } else { head };","let start = 0;","sem arquivo e sem --from-start comeca do zero"),
- ("W10","src/client.rs","                } else {\n                    1\n                };","                } else {\n                    5\n                };","espera fixa sem --reconnect vira 5 s"),]
+ ("W10","src/client.rs","                } else {\n                    1\n                };","                } else {\n                    5\n                };","espera fixa sem --reconnect vira 5 s"),
+ # --- v1.5 cliente e resultado automatico ---
+ ("C29","src/client.rs","    let raw = o\n        .get(flag)\n        .map(str::to_string)\n        .or_else(|| env_value(\"CHATD_AS\"))\n        .or_else(|| o.profile().map(|p| p.identity.clone()));","    let raw = env_value(\"CHATD_AS\")\n        .or_else(|| o.get(flag).map(str::to_string))\n        .or_else(|| o.profile().map(|p| p.identity.clone()));","CHATD_AS passa a vencer --as/--from"),
+ ("C30","src/client.rs","    let raw = o\n        .get(flag)\n        .map(str::to_string)\n        .or_else(|| env_value(\"CHATD_AS\"))\n        .or_else(|| o.profile().map(|p| p.identity.clone()));","    let raw = o\n        .get(flag)\n        .map(str::to_string)\n        .or_else(|| o.profile().map(|p| p.identity.clone()))\n        .or_else(|| env_value(\"CHATD_AS\"));","perfil passa a vencer CHATD_AS"),
+ ("C31","src/client.rs","if !metadata.file_type().is_file()\n        || metadata.uid() != uid\n        || metadata.permissions().mode() & 0o022 != 0","if !metadata.file_type().is_file()\n        || metadata.uid() != uid\n        || metadata.permissions().mode() & 0o000 != 0","configuracao gravavel por grupo/outros e aceita"),
+ ("C32","src/client.rs","    } else if let Some(value) = env_value(\"CHATD_SOCKET\") {\n        (Some(expand_home(&value)), \"env\")\n    } else if let Some(value) = o.file.socket.as_deref() {\n        (Some(expand_home(value)), \"config\")","    } else if let Some(value) = o.file.socket.as_deref() {\n        (Some(expand_home(value)), \"config\")\n    } else if let Some(value) = env_value(\"CHATD_SOCKET\") {\n        (Some(expand_home(&value)), \"env\")","socket do arquivo passa a vencer CHATD_SOCKET no whoami"),
+ ("R30","src/store.rs","                        && from == target.to\n                        && p.to == target.from)","                        && from != target.to\n                        && p.to == target.from)","resposta de B deixa de fechar M"),
+ ("R31","src/store.rs","                        && from == target.to\n                        && p.to == target.from)","                        && from == target.to\n                        && p.to != target.from)","resposta enderecada ao remetente deixa de fechar M"),
+ ("R32","src/store.rs","if !p.keep_open && p.kind == \"RESPOSTA\" {","if p.kind == \"RESPOSTA\" {","--keep-open deixa de impedir o fechamento"),
+ ("R33","src/store.rs","(matches!(target.state, State::Registrado | State::Aceito)\n                        && from == target.to","(true\n                        && from == target.to","mensagem M em resultado pode ser sobrescrita")]
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work")
     ap.add_argument("--target-dir")
     ap.add_argument("--only", default="")
+    ap.add_argument("--skip-test", action="append", default=[], help="arquivo de teste de integracao a omitir na copia de trabalho")
+    ap.add_argument("--test-filter", default="", help="filtro de teste cargo para uma verificacao focada")
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
     if a.list:
@@ -155,6 +166,10 @@ def main():
     for n in ("src", "tests"):
         # shutil.copy (nao copy2): mtime novo, senao o cargo reaproveita o binario de um mutante anterior
         shutil.copytree(os.path.join(REPO, n), os.path.join(work, n), copy_function=shutil.copy)
+    for test in a.skip_test:
+        skipped = os.path.join(work, "tests", os.path.basename(test))
+        if os.path.isfile(skipped):
+            os.unlink(skipped)
     ROOT = os.path.dirname(os.path.dirname(REPO))  # raiz do workspace (Cargo.lock e toolchain)
     for n in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
         src = os.path.join(REPO, n)
@@ -165,7 +180,10 @@ def main():
     env["PATH"] = os.path.expanduser("~/.cargo/bin") + os.pathsep + env["PATH"]
     def cargo_test():
         t = time.time()
-        p = subprocess.run(["cargo", "test", "--offline", "-q"], cwd=work, env=env,
+        cmd = ["cargo", "test", "--offline", "-q"]
+        if a.test_filter:
+            cmd.append(a.test_filter)
+        p = subprocess.run(cmd, cwd=work, env=env,
                            capture_output=True, text=True, timeout=900)
         return p.returncode, p.stdout + p.stderr, time.time() - t
     rc, out, dt = cargo_test()

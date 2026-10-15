@@ -332,21 +332,30 @@ impl Store {
     }
 
     /// Grava um evento: aplica, escreve a linha e faz `sync_data` antes de retornar.
-    fn append(&mut self, mut ev: Map<String, Value>) -> Result<(), ApiError> {
+    fn append(&mut self, ev: Map<String, Value>) -> Result<(), ApiError> {
+        self.append_many(vec![ev])
+    }
+
+    /// Grava eventos sequenciais em um bloco e sincroniza uma vez.
+    fn append_many(&mut self, events: Vec<Map<String, Value>>) -> Result<(), ApiError> {
         if self.broken {
             return Err(internal(
                 "log indisponivel apos falha de escrita".to_string(),
             ));
         }
-        ev.insert("v".into(), json!(1));
-        ev.insert("seq".into(), json!(self.events.len() as u64 + 1));
-        let value = Value::Object(ev);
-        self.apply(&value).map_err(internal)?;
-        let mut line = serde_json::to_vec(&value).map_err(|e| internal(e.to_string()))?;
-        line.push(b'\n');
+        let mut bytes = Vec::new();
+        for mut ev in events {
+            ev.insert("v".into(), json!(1));
+            ev.insert("seq".into(), json!(self.events.len() as u64 + 1));
+            // apply() pushes the event, so calculate each next sequence from the new head.
+            let value = Value::Object(ev);
+            self.apply(&value).map_err(internal)?;
+            serde_json::to_writer(&mut bytes, &value).map_err(|e| internal(e.to_string()))?;
+            bytes.push(b'\n');
+        }
         if self
             .log
-            .write_all(&line)
+            .write_all(&bytes)
             .and_then(|()| self.log.sync_data())
             .is_err()
         {
@@ -403,8 +412,12 @@ impl Store {
     }
 
     /// `message.send` com idempotencia por id. `from` e a identidade ja resolvida.
-    /// Devolve (mensagem, duplicate).
-    pub fn send(&mut self, from: &str, p: &SendParams) -> Result<(Msg, bool), ApiError> {
+    /// Devolve (mensagem, duplicate, id fechado por fechamento automatico).
+    pub fn send(
+        &mut self,
+        from: &str,
+        p: &SendParams,
+    ) -> Result<(Msg, bool, Option<String>), ApiError> {
         let hash = protocol::envelope_hash(
             from,
             &p.to,
@@ -416,7 +429,15 @@ impl Store {
         );
         if let Some(m) = self.msgs.get(&p.id) {
             if m.hash == hash {
-                return Ok((m.clone(), true));
+                let closed = p.thread.as_ref().and_then(|target| {
+                    self.msgs.get(target).and_then(|target_msg| {
+                        let auto_note = format!("auto:{}", p.id);
+                        (target_msg.state == State::Resultado
+                            && target_msg.note.as_deref() == Some(auto_note.as_str()))
+                        .then(|| target.clone())
+                    })
+                });
+                return Ok((m.clone(), true, closed));
             }
             return Err(ApiError::new(
                 "envelope_mismatch",
@@ -455,13 +476,35 @@ impl Store {
         ev.insert("resulted_at".into(), Value::Null);
         ev.insert("result".into(), Value::Null);
         ev.insert("note".into(), Value::Null);
-        self.append(ev)?;
+        let target_to_close = if !p.keep_open && p.kind == "RESPOSTA" {
+            p.thread.as_ref().and_then(|target_id| {
+                self.msgs.get(target_id).and_then(|target| {
+                    (matches!(target.state, State::Registrado | State::Aceito)
+                        && from == target.to
+                        && p.to == target.from)
+                        .then(|| target_id.clone())
+                })
+            })
+        } else {
+            None
+        };
+        let mut events = vec![ev];
+        if let Some(target_id) = &target_to_close {
+            let mut resulted = Map::new();
+            resulted.insert("type".into(), json!("resulted"));
+            resulted.insert("ts".into(), json!(ts));
+            resulted.insert("id".into(), json!(target_id));
+            resulted.insert("result".into(), json!("done"));
+            resulted.insert("note".into(), json!(format!("auto:{}", p.id)));
+            events.push(resulted);
+        }
+        self.append_many(events)?;
         let m = self
             .msgs
             .get(&p.id)
             .cloned()
             .ok_or_else(|| internal("mensagem nao encontrada apos gravar".to_string()))?;
-        Ok((m, false))
+        Ok((m, false, target_to_close))
     }
 
     pub fn list(&self, to: &str, after: u64, limit: usize, unresolved_only: bool) -> Vec<Msg> {
@@ -753,6 +796,7 @@ mod tests {
             body: "corpo".into(),
             thread: None,
             refs: Vec::new(),
+            keep_open: false,
         }
     }
 

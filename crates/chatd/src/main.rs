@@ -18,13 +18,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 const USAGE: &str = "uso: chatd serve --state-dir DIR --config FILE [--socket PATH]\n     \
-chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [--thread ID] [--id ID] [--ref t:v]... [--json]\n     \
+chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [--thread ID] [--id ID] [--ref t:v]... [--keep-open] [--json]\n     \
 chatd inbox [--as N] [--after SEQ] [--all] [--take] [--ids] [--json]\n     \
 chatd ack --id ID [--as N] --stage aceito|resultado [--result R] [--note T]\n     \
 chatd watch [--as N] [--from-start] [--receipts]\n     \
 chatd show --id ID [--as N] [--json]\n     \
 chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]\n     \
 chatd status [--as N] [--json]\n     \
+chatd whoami [--as N] [--profile N] [--json]\n     \
 chatd log --state-dir D [--tail N]\n     \
 chatd token new|revoke NOME --state-dir D | token list --state-dir D\n     \
 clientes: --socket, CHATD_SOCKET, --state-dir ou CHATD_STATE_DIR; identidade: --as/--from ou CHATD_AS; token: --token-file ou CHATD_TOKEN_FILE";
@@ -166,6 +167,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "show" => client::show(rest),
         "bind" => client::bind(rest),
         "status" => client::status(rest),
+        "whoami" => client::whoami(rest),
         "log" => client::log(rest),
         "token" => auth::cli(rest),
         "-h" | "--help" => {

@@ -309,13 +309,22 @@ pub struct SendParams {
     pub body: String,
     pub thread: Option<String>,
     pub refs: Vec<Ref>,
+    pub keep_open: bool,
 }
 
 pub fn parse_send(p: &Map<String, Value>) -> Result<SendParams, ApiError> {
     reject_unknown(
         p,
         &[
-            "id", "from", "to", "kind", "subject", "body", "thread", "refs",
+            "id",
+            "from",
+            "to",
+            "kind",
+            "subject",
+            "body",
+            "thread",
+            "refs",
+            "keep_open",
         ],
     )?;
     let id = req_str(p, "id")?;
@@ -361,6 +370,7 @@ pub fn parse_send(p: &Map<String, Value>) -> Result<SendParams, ApiError> {
         body: body.to_string(),
         thread,
         refs,
+        keep_open: opt_bool(p, "keep_open")?.unwrap_or(false),
     })
 }
 
