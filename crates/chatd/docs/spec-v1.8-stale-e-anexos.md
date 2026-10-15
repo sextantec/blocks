@@ -38,7 +38,7 @@ O `codex-blocks` perde a rede da sandbox as 15:40 e a campainha toca de 10 em 10
 ---
 # Parte B: anexos (arquivos) com validade (rev2: incorpora as revisoes de seguranca do Opus e do Sol 6.1, 2026-10-15)
 
-> **Estado:** rascunho **rev2**. Duas decisoes do Jabbur continuam abertas e esta rev2 assume a recomendacao em ambas (marcadas **[CONFIRMAR]**): (1) **sem deduplicacao** entre envios; (2) anexos **desligados por destinatario** ate o Jabbur liberar (opt-in). Se ele decidir o contrario, reverte-se so esses dois pontos.
+> **Estado:** rascunho **rev2**. Duas decisoes do Jabbur continuam abertas e esta rev2 assume a recomendacao em ambas (marcadas **[CONFIRMAR]**): (1) ~~sem deduplicacao entre envios~~ **CONFIRMADO pelo Jabbur ("Pendencia 1 de 3: A", 2026-10-15 noite)**; (2) anexos **desligados por destinatario** ate o Jabbur liberar (opt-in). Se ele decidir o contrario, reverte-se so esses dois pontos.
 
 ### Problema (exemplo)
 Agentes em sandboxes diferentes **nao enxergam os arquivos uns dos outros**; o unico canal que todos alcancam e o socket do `chatd`. Hoje: o Codex da Web nao le a bancada (grava-se a interface em `docs/agentes/` dentro do repositorio dele); o `codex-blocks` nao leu o repositorio do `agentd`; o brief do Sol precisa ser inline (teto de 64 KB); o corpo da mensagem tem teto de 16 KiB.
@@ -57,7 +57,7 @@ Decisao: "o status deve dizer somente se o daemon esta funcionando e estatistica
 - **Testes novos:** **B16** `status` com auth ligada e sem token responde `ok:true` com so contagens; **B17** nenhum nome de agente/destinatario/perfil/painel aparece na resposta (sentinela em nome de destinatario configurado); **B18** `mailbox.counts` devolve so a caixa da identidade; outra identidade nao ve a alheia; **B19** `inbox --count` imprime as tres contagens.
 
 ### Modelo
-- **Blob = um envio.** Cada `put` cria um blob **independente**, com id opaco `blob:<32 hex aleatorios>` (128 bits de `getrandom`). **Sem deduplicacao** entre envios (ni entre donos, ni do mesmo dono) **[CONFIRMAR]**: o hash SHA-256 e **metadado de integridade**, nunca um identificador de autorizacao. Motivos (Opus S2 e Sol S01 a S03): a deduplicacao cria oraculo de existencia, ambiguidade de vinculo/TTL e corridas; 256 MiB nao pedem dedup.
+- **Blob = um envio.** Cada `put` cria um blob **independente**, com id opaco `blob:<32 hex aleatorios>` (128 bits de `getrandom`). **Sem deduplicacao** entre envios (nem entre donos, nem do mesmo dono; **decidido pelo Jabbur**, A18): o hash SHA-256 e **metadado de integridade**, nunca um identificador de autorizacao. Motivos (Opus S2 e Sol S01 a S03): a deduplicacao cria oraculo de existencia, ambiguidade de vinculo/TTL e corridas; 256 MiB nao pedem dedup.
 - **Dono** = identidade que enviou; **destinatario** = exatamente um nome declarado no envio. Ninguem mais le. **Para ausente, vencido ou nao autorizado a resposta e a mesma: `not_found`** (sem `forbidden`, sem campos extras), para nao revelar existencia.
 - **Opt-in por destinatario [CONFIRMAR]:** `config.json` `recipients.NOME.blobs: true` (padrao `false`). Envio para quem nao liberou: `blobs_disabled`. O dono liga caso a caso.
 - **Validade obrigatoria:** `expires_at` = `created_at` + `ttl_s`. Padrao `blob_default_ttl_s` 86400 (24 h), maximo `blob_max_ttl_s` 604800 (7 dias), **minimo 60 s** (decisao do Jabbur: 24 h e 7 dias). Prazo calculado no relogio **monotonico** do processo; persistem `created_at` e `ttl_s`; na partida vale `min(parede, created_at + blob_max_ttl_s)`.
@@ -111,4 +111,33 @@ Criar: temporario `O_EXCL` 0600 -> `fsync` -> `rename` para `blobs/<aa>/<id>` ->
 
 ## Perguntas abertas (decisao do Jabbur)
 1. ~~Validade~~ **Decidido (A13):** 24 h padrao, 7 dias maximo. 2. ~~Tamanhos~~ **Decidido (A14):** 8 MiB, 256 MiB. 3. ~~Remocao automatica ao `resultado`~~ **Decidido (A15): nao.** 4. ~~Broadcast~~ **Decidido (A16): nao.**
-5. **[CONFIRMAR] Sem deduplicacao** entre envios (recomendado pelo Opus e pelo Sol). 6. **[CONFIRMAR] Opt-in por destinatario** (padrao desligado; o Jabbur liga um a um).
+5. ~~Sem deduplicacao entre envios~~ **Decidido (A18): sem dedup.** 6. **[CONFIRMAR] Opt-in por destinatario** (padrao desligado; o Jabbur liga um a um).
+
+---
+# Parte C: obrigacoes explicitas (recibo `bloqueado`, `due`, `obligations`) (RASCUNHO; decisao do Jabbur "Pendencia 1: A", 2026-10-15 noite)
+
+Origem: consulta ao Opus e ao Astra (`docs/consulta-orquestrador-mensagens-nao-respondidas-2026-10-15.md` da bancada). Problema: um PEDIDO **aceito** e nunca respondido; no caso real o agente nao esquecera, **achou que nao podia** responder e nao tinha um jeito barato e permitido de dizer isso. Esta parte e **mudanca de contrato publico** e **altera o daemon** (novo estagio de recibo e novos campos); passa pela mesma revisao de seguranca da Parte B antes de implementar.
+
+### Modelo
+- **`aceito` continua significando "recebi o texto"** (v1.4: `inbox --take`), nao "assumi". O compromisso e sinalizado por `bloqueado` ou `resultado`.
+- **Recibo `bloqueado` (novo, nao terminal, repetivel):** `chatd ack --id ID --stage bloqueado --await CLASSE --note TXT`. Efeito: a mensagem **continua `aceito`** com a anotacao `{await, since, note}`; um novo `bloqueado` substitui a anterior; `--await none` limpa. `resultado` encerra tudo. `CLASSE` (mesmo vocabulario do `blocked_reason` do `agentd`): `permission` (aprovacao de comando/ferramenta), `user_input` (decisao ou resposta humana), `network` (sandbox/transporte, EPERM), `identity` (identidade errada ou ausente), `policy` (duvida se a regra permite), `unknown`. `note`: ate 200 caracteres, mesmo alfabeto e validacao do assunto; **nunca** e repassada a modelo por hook.
+- **`refused` e `failed` exigem `--note`** (ate 200 caracteres). Sem nota: erro de uso (2).
+- **`due` (prazo de resultado, declarado pelo remetente):** `chatd send --due DUR` (ate 24 h). Contado a partir do `registered` (o prazo e do remetente). Padroes por tipo em `config.json` `due_defaults`: `PEDIDO` 30 min, `PERGUNTA` 15 min; `AVISO`, `RESPOSTA`, `ACK` sem prazo. Persistem `created_at` e `due_s`; o vencimento usa o relogio monotonico do processo e, na partida, o relogio de parede limitado por `created_at + due_s`.
+- **Quem arma o relogio:** o `chatd`/`chatd stale` (terceiro, sem modelo, custo zero em tokens), **nunca** o destinatario. O alerta vai ao **orquestrador e ao dono**, nunca ao agente travado; um alerta por `id` e estagio (`accept`, `due`, `result`); **nenhum reenvio automatico de PEDIDO** e **vencimento nunca conclui nem reatribui sozinho**.
+- **`chatd obligations [--as N] [--json]`:** lista, por agente, as mensagens `PEDIDO`/`PERGUNTA` aceitas sem `resultado`: `id`, `kind`, `from`, `registered_at`, `accepted_at`, `due_at`, `overdue`, `await`, `since`, `note`. **Sem assunto nem corpo.** Cliente puro sobre o log (como `chatd stale`). `chatd stale` ganha o alerta `due_expired` e usa `due` no lugar do T2 quando houver.
+- **Hook de fim de turno (extensao opcional, cliente):** nao bloqueante. Ao encerrar o turno, se houver obrigacao do proprio agente `aceito` sem `resultado` **e** sem `bloqueado` posterior ao aceite, grava `chatd ack --stage bloqueado --await unknown --note "turno encerrado sem recibo"`. Nenhum texto de mensagem entra no hook; falha do socket **libera** o encerramento (fail-open) e registra. Claude: hook `Stop` do projeto; Codex: so com ok do Jabbur em `/hooks` e teste isolado; Pi headless: o runner. Bloquear o turno (uma vez, so no Claude, com `stop_hook_active` e contador) fica **fora** desta versao.
+
+### Contrato testavel (Parte C)
+- **C1** `ack --stage bloqueado` mantem a mensagem `aceito`, grava `{await, since, note}`; repetir substitui; `--await none` limpa; `resultado` encerra.
+- **C2** `await` fora do vocabulario ou `note` > 200 / com caractere proibido => saida 2, nada gravado. **C3** `refused`/`failed` sem `--note` => saida 2.
+- **C4** `send --due 20m` grava `due`; acima de 24 h recusado; padrao por tipo aplicado; `AVISO` sem prazo.
+- **C5** `chatd obligations`: so PEDIDO/PERGUNTA aceitos sem resultado, com `overdue` correto, **sem assunto nem corpo** (sentinela); `--as` de outro agente so por quem pode ler o log.
+- **C6** `chatd stale`: `due_expired` dispara apos o prazo e nao antes; um alerta por `id` e estagio; `bloqueado` nao silencia o alerta de prazo (so o anota); episodio encerra com `resulted`.
+- **C7** hook de fim de turno: com obrigacao sem recibo grava `bloqueado unknown`; com `bloqueado` ja gravado ou `resultado`, nao faz nada; socket indisponivel (EPERM): sai 0 e registra, nao bloqueia o encerramento; nunca imprime assunto/corpo.
+- **C8** compatibilidade: `ack` antigo (`aceito`/`resultado`) inalterado; suites v1.1 a v1.7 e a auditoria F verdes; daemon antigo recusa o estagio novo com erro claro; **daemon antigo com evento `blocked` no log recusa subir** (documentado).
+- **C9** nenhum recibo gera resposta automatica de outro agente (sem pingue-pongue); alerta nao e enviado ao destinatario travado.
+- **C10** `visible()`: o evento `blocked` so e visto por remetente e destinatario da mensagem; `status` conta so em agregado (sem nomes).
+
+### Fora desta versao
+Heartbeat periodico; `last_progress_at` por agente (vem do `agentd`/hooks declared); renegociacao de prazo; reatribuicao automatica; bloquear o turno por hook.
+
