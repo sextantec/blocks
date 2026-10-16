@@ -1,0 +1,23 @@
+# `codex queue`: o que o codigo do Codex 0.163.0 garante (leitura do fonte, 2026-10-16)
+
+Fonte lido: `ref/codex` (clone raso da tag `rust-v0.163.0` de `github.com/openai/codex`, fora do git do blocks; ver `.git/info/exclude`). Pedido do Jabbur: "temos que parar de confiar em readme e documentacao e passar a ler o codigo" (AGENTS.md, regra 13). Caminhos abaixo relativos a `ref/codex/codex-rs/`. Contexto e consulta ao Sol: bancada `docs/consulta-codex-canal-sol-2026-10-16.md`.
+
+## Cadeia, do comando ate a execucao
+1. `cli/src/queue_cmd.rs:52` chama `codex_tui::run_session_queue_command`; a mensagem e obrigatoriamente nao vazia (`NonEmptyStringValueParser`) e imagens sao recusadas.
+2. `tui/src/session_queue_commands.rs:27-80`: **recusa `--no-daemon`** (linha 32) e recusa enfileirar por um app-server embutido se ha daemon local rodando; resolve `--thread` como UUID ou como **nome exato** entre sessoes **ativas** (linhas ~96-108) e envia `ClientRequest::ThreadQueueAdd` (metodo `thread/queue/add`, linha 114).
+3. `app-server/src/request_processors/thread_queue_processor.rs:78-95` (`add`): valida, exige a thread (carregada ou lida do armazenamento, **recusa arquivada**; **recusa efemera**, linha 263) e chama `service.enqueue`. **So enfileira; nao inicia turno.** Resposta: id do item na fila.
+4. `ext/queue/src/lib.rs:1`: "Durable, storage-neutral user-message queue and idle dispatch". A fila e **duravel** (armazenamento da thread).
+5. `ext/queue/src/service.rs:96-246` (`watch_external_messages`): a cada **10 s** (linha 96) confere a versao do banco; para cada thread **carregada** com fila alterada, abre uma tarefa de despacho que repete a cada 10 s (linha 239) enquanto a fila nao esvazia. **Nao despacha** se `agent_status` e `Running`, `Interrupted`, `Shutdown` ou `NotFound` (linhas 218-225). Caso contrario chama `wake_if_loaded` (linhas 472-483), que emite o evento de ociosidade (exceto se `Interrupted`).
+6. O despacho vira `start_if_idle` (`core/src/session/turn_input.rs:461-`): sob o mesmo trinco, se ha **turno ativo** (`active_turn.is_some()`, linha 519) devolve `NotSubmitted { NotIdle }` e **nao inicia**. Tambem recusa com mailbox de gatilho pendente e com o servidor drenando.
+
+## Consequencias (leitura do codigo; o que NAO foi provado esta marcado)
+- **A mensagem enfileirada inicia um turno NOVO quando a thread esta ociosa; nao entra no meio de um turno, nao responde aprovacao, nao usa `turn/steer`.** Um dialogo de aprovacao e parte de um turno ativo, entao a fila espera o turno acabar (inferencia direta de 5 e 6; **confirmar em experimento**).
+- **Atraso de ate ~10 s** entre `queue add` e o inicio (intervalo do vigia). Aceitavel para lembrete.
+- **Custo:** cada mensagem enfileirada que dispara um turno consome uma chamada de modelo. O `chatd` precisa de rearme/deduplicacao no lado dele (a v1.10 torna o rearme duravel).
+- **Thread interrompida pelo usuario (`Interrupted`) nao recebe despacho automatico**; o vigia espera. Uma sessao que o dono interrompeu nao e "acordada" a forca.
+- Falha clara: UUID/nome inexistente -> "No active session found"; arquivada -> instrui `codex unarchive`; sem daemon -> erro. Nada disso cai em teclado.
+- **Seguranca do socket:** o diretorio de controle e criado `0o700` e o socket `0o600` (`app-server-transport/src/transport/unix_socket.rs:31,56,436`): so o mesmo UID. Qualquer processo do mesmo usuario que fale o protocolo pode enfileirar (e, pelo mesmo protocolo, muito mais que isso); o texto fixo nao reduz essa autoridade. Nada de TCP.
+- **Nao verificado no codigo/por experimento:** (a) como a TUI trata um **rascunho** no compositor quando o turno enfileirado inicia (o rascunho e estado local da TUI; `ThreadQueueChanged` so troca o alvo, `tui/src/app/app_server_event_targets.rs:80`); (b) o comportamento real com aprovacao aberta; (c) coalescencia de varias mensagens iguais enfileiradas. Experimentos: ver a bancada, `docs/consulta-codex-canal-sol-2026-10-16.md`, secao 5 (adaptados: lab com `CODEX_HOME` proprio nao tem credencial; usar uma sessao Luna nova num tmux de laboratorio, cwd temporario).
+
+## Encaixe no chatd (proposta, ainda sem codigo)
+Canal opt-in `codex-queue` (ao lado de arquivo e barra do tmux): vinculo explicito destinatario -> UUID/nome da sessao; `codex queue --thread X --message "<texto fixo da v1.1>"` por `argv`, sem shell, com timeout e saida limitada; falha fechada; **nunca fallback para teclado**; timeout apos aceitar = resultado incerto (nao reenviar de imediato); registro de tentativa no log; testes automaticos com executavel falso. Substitui a campainha por digitacao para o Codex.
