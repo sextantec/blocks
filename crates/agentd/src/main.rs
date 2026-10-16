@@ -1,3 +1,4 @@
+mod app_server;
 mod config;
 mod daemon;
 mod rules;

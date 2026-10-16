@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, Selector},
+    config::{Config, Selector, StructuredSource},
     rules::Rules,
     tmux,
 };
@@ -31,7 +31,40 @@ pub fn run(args: Vec<String>) -> Result<(), Failure> {
     if args.first().map(String::as_str) == Some("serve") {
         return serve_cli(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("report") {
+        report_cli(&args[1..]);
+        return Ok(());
+    }
     cli(&args)
+}
+
+fn report_cli(args: &[String]) {
+    let event = args.first().map(String::as_str).unwrap_or("");
+    let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let timeout = opt(args, "--timeout-ms")
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| {
+            std::env::var("AGENTD_REPORT_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(1000)
+        .clamp(100, 5000);
+    if let Some(sock) = socket_for(args)
+        && let Ok(mut stream) = UnixStream::connect(sock)
+    {
+        let duration = Duration::from_millis(timeout);
+        let _ = stream.set_read_timeout(Some(duration));
+        let _ = stream.set_write_timeout(Some(duration));
+        let _ = writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"agent.report","params":{"v":1,"event":event,"pane":pane}})
+        );
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        let _ = reader.read_line(&mut response);
+    }
 }
 fn opt(args: &[String], name: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
@@ -76,6 +109,7 @@ struct Rec {
     last_known: Option<String>,
     cwd: Option<String>,
     terminal: Option<(String, u32)>,
+    terminal_confirmations: u8,
     blocked_reason: Option<String>,
     rule: Option<String>,
     input: Option<String>,
@@ -84,6 +118,18 @@ struct Rec {
     idle_key: Option<(String, u32, u64, String)>,
     idle_first: Option<Instant>,
     idle_n: u64,
+    screen_state: String,
+    screen_marks: Vec<String>,
+    screen_reason: Option<String>,
+    screen_rule: Option<String>,
+    screen_input: Option<String>,
+    structured_state: Option<String>,
+    structured_reason: Option<String>,
+    structured_at: Option<Instant>,
+    structured_lost: bool,
+    structured_fallback: bool,
+    diverged_since: Option<Instant>,
+    override_since: Option<Instant>,
 }
 struct Core {
     cfg: Config,
@@ -101,6 +147,15 @@ struct Core {
     last_output: BTreeMap<String, Instant>,
     discover_found: usize,
     discover_ignored: usize,
+    hooks_accepted: u64,
+    hooks_rejected: u64,
+    hooks_last_ok: Option<u64>,
+    hooks_last_error: Option<String>,
+    app_last_ok: Option<u64>,
+    app_last_error: Option<String>,
+    app_accepted: u64,
+    app_rejected: u64,
+    screen_samples: VecDeque<(Instant, String, bool)>,
 }
 impl Core {
     fn changed(
@@ -147,6 +202,9 @@ impl Core {
         let now = Instant::now();
         let ids: Vec<_> = self.agents.keys().cloned().collect();
         for id in ids {
+            if self.agents[&id].absent.is_some() {
+                continue;
+            }
             let old = {
                 let a = &self.agents[&id];
                 (
@@ -220,61 +278,8 @@ fn serve(cfg: Config, rules: Rules, socket: PathBuf) -> Result<(), Failure> {
         .as_nanos() as u64
         ^ (std::process::id() as u64).rotate_left(31))
     .to_string();
-    let agents = cfg
-        .agents
-        .keys()
-        .map(|id| {
-            (
-                id.clone(),
-                Rec {
-                    kind: cfg.agents[id].kind.clone(),
-                    origin: "configured".into(),
-                    dynamic: false,
-                    identity: None,
-                    gone_since: None,
-                    state: "unknown".into(),
-                    marks: vec!["error".into()],
-                    evidence: "none".into(),
-                    source: None,
-                    last_seen: None,
-                    observed: None,
-                    observed_at: None,
-                    last_known: None,
-                    cwd: None,
-                    terminal: None,
-                    blocked_reason: None,
-                    rule: None,
-                    input: None,
-                    since: None,
-                    absent: None,
-                    idle_key: None,
-                    idle_first: None,
-                    idle_n: 0,
-                },
-            )
-        })
-        .collect();
-    let core = Arc::new(Mutex::new(Core {
-        cfg: cfg.clone(),
-        epoch,
-        start: Instant::now(),
-        agents,
-        seq: 0,
-        ring: VecDeque::new(),
-        subs: vec![],
-        source_ok: false,
-        source_last: None,
-        source_error: Some("source_spawn_failed".into()),
-        rules,
-        event_mode: if cfg.events {
-            "degraded".into()
-        } else {
-            "off".into()
-        },
-        last_output: BTreeMap::new(),
-        discover_found: 0,
-        discover_ignored: 0,
-    }));
+    let core = Arc::new(Mutex::new(initial_core(cfg.clone(), rules, epoch)));
+    spawn_app_server_workers(&cfg, &core);
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     {
         let c = core.clone();
@@ -310,6 +315,104 @@ fn serve(cfg: Config, rules: Rules, socket: PathBuf) -> Result<(), Failure> {
     }
     let _ = fs::remove_file(socket);
     Ok(())
+}
+
+fn spawn_app_server_workers(cfg: &Config, core: &Arc<Mutex<Core>>) {
+    for (id, agent) in &cfg.agents {
+        if let Some(StructuredSource::CodexAppServer { thread_file }) = &agent.structured {
+            let id = id.clone();
+            let core = core.clone();
+            let socket = cfg.codex_socket.clone();
+            let thread_file = thread_file.clone();
+            let reread = Duration::from_secs(cfg.thread_file_reread_s);
+            let min_delay = Duration::from_secs(cfg.codex_reconnect_min_s);
+            let max_delay = Duration::from_secs(cfg.codex_reconnect_max_s);
+            thread::spawn(move || {
+                crate::app_server::observe(
+                    &socket,
+                    &thread_file,
+                    reread,
+                    min_delay,
+                    max_delay,
+                    |status| update_app_status(&core, &id, status),
+                )
+            });
+        }
+    }
+}
+
+fn initial_core(cfg: Config, rules: Rules, epoch: String) -> Core {
+    let agents = cfg
+        .agents
+        .iter()
+        .map(|(id, agent)| (id.clone(), configured_rec(agent)))
+        .collect();
+    Core {
+        cfg: cfg.clone(),
+        epoch,
+        start: Instant::now(),
+        agents,
+        seq: 0,
+        ring: VecDeque::new(),
+        subs: vec![],
+        source_ok: false,
+        source_last: None,
+        source_error: Some("source_spawn_failed".into()),
+        rules,
+        event_mode: if cfg.events {
+            "degraded".into()
+        } else {
+            "off".into()
+        },
+        last_output: BTreeMap::new(),
+        discover_found: 0,
+        discover_ignored: 0,
+        hooks_accepted: 0,
+        hooks_rejected: 0,
+        hooks_last_ok: None,
+        hooks_last_error: None,
+        app_last_ok: None,
+        app_last_error: None,
+        app_accepted: 0,
+        app_rejected: 0,
+        screen_samples: VecDeque::new(),
+    }
+}
+
+fn configured_rec(agent: &crate::config::AgentConfig) -> Rec {
+    let hooks = matches!(agent.structured, Some(StructuredSource::ClaudeHooks));
+    let app_server = matches!(
+        agent.structured,
+        Some(StructuredSource::CodexAppServer { .. })
+    );
+    let mut rec = fresh_rec(&agent.kind, "configured", false, None);
+    rec.structured_at = hooks.then(Instant::now);
+    rec.structured_lost = app_server;
+    rec
+}
+
+fn update_app_status(core: &Arc<Mutex<Core>>, id: &str, status: crate::app_server::Status) {
+    let mut c = core.lock().unwrap();
+    if !c.agents.contains_key(id) {
+        return;
+    }
+    let before = old(&c.agents[id]);
+    let cfg = c.cfg.clone();
+    let a = c.agents.get_mut(id).unwrap();
+    a.structured_state = Some(status.state);
+    a.structured_reason = status.reason;
+    a.structured_at = Some(Instant::now());
+    a.structured_lost = status.lost;
+    a.structured_fallback = status.fallback;
+    if status.lost {
+        c.app_last_error = Some("app_server_unavailable".into());
+    } else {
+        c.app_last_ok = Some(crate::time::wall_ms());
+        c.app_last_error = None;
+        c.app_accepted = c.app_accepted.saturating_add(1);
+    }
+    reconcile(c.agents.get_mut(id).unwrap(), id, &cfg, Instant::now());
+    c.changed(id, before);
 }
 
 struct EventClient {
@@ -371,6 +474,7 @@ fn fresh_rec(kind: &str, origin: &str, dynamic: bool, identity: Option<(String, 
         last_known: None,
         cwd: None,
         terminal: None,
+        terminal_confirmations: 0,
         blocked_reason: None,
         rule: None,
         input: None,
@@ -379,6 +483,18 @@ fn fresh_rec(kind: &str, origin: &str, dynamic: bool, identity: Option<(String, 
         idle_key: None,
         idle_first: None,
         idle_n: 0,
+        screen_state: "unknown".into(),
+        screen_marks: vec!["error".into()],
+        screen_reason: None,
+        screen_rule: None,
+        screen_input: None,
+        structured_state: None,
+        structured_reason: None,
+        structured_at: None,
+        structured_lost: false,
+        structured_fallback: false,
+        diverged_since: None,
+        override_since: None,
     }
 }
 
@@ -782,10 +898,20 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                                     .is_some_and(|p| clients.contains_key(&p.session));
                             let mut per_agent_error = read.error.clone();
                             if let Some(code) = per_agent_error.as_deref() {
-                                apply_error(c.agents.get_mut(&id).unwrap(), code);
+                                let a = c.agents.get_mut(&id).unwrap();
+                                use_screen_view(a);
+                                apply_error(a, code);
+                                save_screen_view(a);
+                                reconcile(a, &id, &cfg, now);
                             } else if let Some(pane) = read.pane {
                                 if let Some(screen) = read.screen {
                                     let decision = c.rules.evaluate(&kind, &screen, &pane.title);
+                                    c.screen_samples.push_back((
+                                        Instant::now(),
+                                        kind.clone(),
+                                        decision.state != "unknown",
+                                    ));
+                                    use_screen_view(c.agents.get_mut(&id).unwrap());
                                     apply_valid(
                                         &mut c,
                                         &id,
@@ -798,12 +924,23 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                                         event_live,
                                         now,
                                     );
+                                    let a = c.agents.get_mut(&id).unwrap();
+                                    save_screen_view(a);
+                                    reconcile(a, &id, &cfg, now);
                                 } else {
                                     per_agent_error = Some("capture_failed".into());
-                                    apply_error(c.agents.get_mut(&id).unwrap(), "capture_failed");
+                                    let a = c.agents.get_mut(&id).unwrap();
+                                    use_screen_view(a);
+                                    apply_error(a, "capture_failed");
+                                    save_screen_view(a);
+                                    reconcile(a, &id, &cfg, now);
                                 }
                             } else {
-                                apply_absent(c.agents.get_mut(&id).unwrap(), now, gone_after_s);
+                                let a = c.agents.get_mut(&id).unwrap();
+                                use_screen_view(a);
+                                apply_absent(a, now, gone_after_s);
+                                save_screen_view(a);
+                                reconcile(a, &id, &cfg, now);
                             }
                             if let Some(code) = per_agent_error {
                                 c.source_error = Some(code);
@@ -988,6 +1125,212 @@ fn apply_error(a: &mut Rec, _code: &str) {
     a.idle_first = None;
     unmark(a, "idle_unconfirmed");
 }
+
+fn use_screen_view(a: &mut Rec) {
+    a.state = a.screen_state.clone();
+    a.marks = a.screen_marks.clone();
+    a.blocked_reason = a.screen_reason.clone();
+    a.rule = a.screen_rule.clone();
+    a.input = a.screen_input.clone();
+}
+
+fn save_screen_view(a: &mut Rec) {
+    a.screen_state = a.state.clone();
+    a.screen_marks = a.marks.clone();
+    a.screen_reason = a.blocked_reason.clone();
+    a.screen_rule = a.rule.clone();
+    a.screen_input = a.input.clone();
+}
+
+fn reconcile(a: &mut Rec, id: &str, cfg: &Config, now: Instant) {
+    if a.absent.is_some() {
+        use_screen_view(a);
+        return;
+    }
+    let Some(ac) = cfg.agents.get(id).filter(|ac| ac.structured.is_some()) else {
+        use_screen_view(a);
+        if !a.screen_marks.contains(&"error".to_string())
+            || a.screen_marks.contains(&"unmatched".to_string())
+        {
+            a.evidence = "observed".into();
+            a.source = Some("tmux".into());
+        }
+        return;
+    };
+    if a.screen_state == "gone" {
+        use_screen_view(a);
+        a.source = Some("tmux".into());
+        a.evidence = "observed".into();
+        return;
+    }
+    if matches!(ac.structured, Some(StructuredSource::ClaudeHooks))
+        && a.structured_at
+            .is_some_and(|t| now.duration_since(t).as_secs() >= cfg.hooks_silence_s)
+        && a.screen_state == "working"
+    {
+        a.structured_lost = true;
+    }
+    if a.structured_state.as_deref() == Some("unknown") && !a.structured_fallback {
+        publish_structured_unknown(a, ac);
+        return;
+    }
+    let active = !a.structured_lost && a.structured_state.is_some();
+    if !active
+        || !matches!(
+            a.structured_state.as_deref(),
+            Some("idle" | "working" | "blocked")
+        )
+    {
+        publish_screen_state(a);
+        return;
+    }
+    let e = a
+        .structured_state
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
+    a.marks = a.screen_marks.clone();
+    sync_structured_lost_mark(a);
+    sync_structured_lost_mark(a);
+    match e.as_str() {
+        "working" | "blocked" => reconcile_active(a, ac, &e, now, cfg),
+        _ if matches!(a.screen_state.as_str(), "working" | "blocked") => {
+            reconcile_screen_conflict(a, now, cfg)
+        }
+        _ => reconcile_idle(a, ac),
+    }
+}
+
+fn publish_structured_unknown(a: &mut Rec, ac: &crate::config::AgentConfig) {
+    a.state = "unknown".into();
+    a.blocked_reason = None;
+    a.rule = None;
+    a.input = None;
+    a.source = Some(structured_source(ac).into());
+    a.evidence = "reported".into();
+    sync_structured_lost_mark(a);
+    unmark(a, "screen_override");
+    unmark(a, "diverged");
+}
+
+fn publish_screen_state(a: &mut Rec) {
+    use_screen_view(a);
+    sync_structured_lost_mark(a);
+    a.evidence = "observed".into();
+    a.source = Some("tmux".into());
+}
+
+fn sync_structured_lost_mark(a: &mut Rec) {
+    if a.structured_lost {
+        mark(a, "structured_lost");
+    } else {
+        unmark(a, "structured_lost");
+    }
+}
+
+fn structured_source(ac: &crate::config::AgentConfig) -> &'static str {
+    if matches!(ac.structured, Some(StructuredSource::ClaudeHooks)) {
+        "hooks"
+    } else {
+        "app_server"
+    }
+}
+
+fn reconcile_active(
+    a: &mut Rec,
+    ac: &crate::config::AgentConfig,
+    state: &str,
+    now: Instant,
+    cfg: &Config,
+) {
+    a.diverged_since = None;
+    if state == "working" && a.screen_state == "blocked" && a.screen_rule.is_some() {
+        a.override_since = None;
+        publish_screen_state(a);
+        unmark(a, "screen_override");
+        unmark(a, "diverged");
+        return;
+    }
+    if a.screen_state == "idle" && a.screen_rule.is_some() {
+        let since = *a.override_since.get_or_insert(now);
+        let old_report = a
+            .structured_at
+            .is_some_and(|reported| now.duration_since(reported).as_secs() >= cfg.override_after_s);
+        if state == "working"
+            && old_report
+            && now.duration_since(since).as_secs() >= cfg.override_after_s
+        {
+            a.state = "idle".into();
+            a.blocked_reason = None;
+            a.input = a.screen_input.clone();
+            a.rule = a.screen_rule.clone();
+            a.source = Some("tmux".into());
+            a.evidence = "observed".into();
+            mark(a, "screen_override");
+            unmark(a, "diverged");
+            return;
+        }
+    } else {
+        a.override_since = None;
+    }
+    a.state = state.into();
+    a.blocked_reason = a.structured_reason.clone();
+    a.rule = None;
+    a.input = None;
+    a.source = Some(structured_source(ac).into());
+    a.evidence = if a.screen_state == state {
+        "both"
+    } else {
+        "reported"
+    }
+    .into();
+    unmark(a, "screen_override");
+    unmark(a, "diverged");
+}
+
+fn reconcile_screen_conflict(a: &mut Rec, now: Instant, cfg: &Config) {
+    a.state = a.screen_state.clone();
+    a.blocked_reason = a.screen_reason.clone();
+    a.rule = a.screen_rule.clone();
+    a.input = None;
+    a.source = Some("tmux".into());
+    a.evidence = "observed".into();
+    let since = *a.diverged_since.get_or_insert(now);
+    if now.duration_since(since).as_millis() as u64 >= cfg.diverge_after_ms {
+        mark(a, "diverged");
+    }
+    unmark(a, "screen_override");
+}
+
+fn reconcile_idle(a: &mut Rec, ac: &crate::config::AgentConfig) {
+    a.diverged_since = None;
+    a.override_since = None;
+    if a.terminal.is_none() || a.terminal_confirmations < 2 {
+        a.state = "unknown".into();
+        a.blocked_reason = None;
+        a.rule = None;
+        a.input = None;
+        a.source = Some(structured_source(ac).into());
+        a.evidence = "reported".into();
+    } else {
+        a.state = "idle".into();
+        a.blocked_reason = None;
+        a.rule = a.screen_rule.clone();
+        a.input = if a.screen_state == "idle" {
+            a.screen_input.clone()
+        } else {
+            None
+        };
+        a.source = Some(structured_source(ac).into());
+        a.evidence = if a.screen_state == "idle" {
+            "both"
+        } else {
+            "reported"
+        }
+        .into();
+    }
+    unmark(a, "diverged");
+    unmark(a, "screen_override");
+}
 fn apply_absent(a: &mut Rec, now: Instant, gone_after_s: u64) {
     if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
         a.last_known = Some(a.state.clone());
@@ -1044,6 +1387,7 @@ fn apply_valid(
             a.last_known = Some(a.state.clone());
         }
         a.terminal = Some(pair);
+        a.terminal_confirmations = 1;
         a.state = "unknown".into();
         mark(a, "error");
         a.blocked_reason = None;
@@ -1057,6 +1401,11 @@ fn apply_valid(
         unmark(a, "idle_unconfirmed");
         return;
     }
+    a.terminal_confirmations = if a.terminal.as_ref() == Some(&pair) {
+        a.terminal_confirmations.saturating_add(1).min(2)
+    } else {
+        1
+    };
     a.terminal = Some(pair.clone());
     let marks = d.marks.clone();
     if d.state == "idle" {
@@ -1140,6 +1489,104 @@ fn valid_params(p: &Value, allowed: &[&str]) -> Result<(), (String, Value)> {
     }
     Ok(())
 }
+
+fn screen_health(c: &mut Core) -> Value {
+    let cutoff = Instant::now() - Duration::from_secs(c.cfg.screen_health_window_s);
+    while c.screen_samples.front().is_some_and(|s| s.0 < cutoff) {
+        c.screen_samples.pop_front();
+    }
+    let mut reads = serde_json::Map::new();
+    let mut unmatched = serde_json::Map::new();
+    let mut ratios = serde_json::Map::new();
+    let kinds: BTreeMap<String, ()> = c.agents.values().map(|a| (a.kind.clone(), ())).collect();
+    for kind in kinds.keys() {
+        let samples: Vec<_> = c.screen_samples.iter().filter(|s| &s.1 == kind).collect();
+        let total = samples.len() as u64;
+        let misses = samples.iter().filter(|s| !s.2).count() as u64;
+        reads.insert(kind.clone(), json!(total));
+        unmatched.insert(kind.clone(), json!(misses));
+        ratios.insert(
+            kind.clone(),
+            json!(if total == 0 {
+                0.0
+            } else {
+                misses as f64 / total as f64
+            }),
+        );
+    }
+    json!({"reads":reads,"unmatched":unmatched,"unmatched_ratio":ratios})
+}
+
+fn status_result(p: &Value, c: &mut Core) -> Result<Value, (String, Value)> {
+    valid_params(p, &["v"])?;
+    c.snapshot();
+    let agents: serde_json::Map<String, Value> = c.agents.iter().map(|(id, a)| (id.clone(), json!({"state":a.state,"origin":a.origin,"marks":a.marks,"source":a.source,"last_seen":a.last_seen,"since":a.since,"blocked_reason":a.blocked_reason}))).collect();
+    let hooks_configured = c
+        .cfg
+        .agents
+        .values()
+        .any(|a| matches!(a.structured, Some(StructuredSource::ClaudeHooks)));
+    let app_configured = c
+        .cfg
+        .agents
+        .values()
+        .any(|a| matches!(a.structured, Some(StructuredSource::CodexAppServer { .. })));
+    let screen = screen_health(c);
+    Ok(
+        json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"tmux":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error,"events":c.event_mode,"discover":{"on":c.cfg.discover,"found":c.discover_found,"ignored":c.discover_ignored}},"hooks":{"ok":hooks_configured && c.hooks_last_ok.is_some() && c.hooks_last_error.is_none(),"last_ok_at":c.hooks_last_ok,"last_error":c.hooks_last_error,"reports":{"accepted":c.hooks_accepted,"rejected":c.hooks_rejected}},"app_server":{"ok":app_configured && c.app_last_ok.is_some() && c.app_last_error.is_none(),"last_ok_at":c.app_last_ok,"last_error":c.app_last_error,"reports":{"accepted":c.app_accepted,"rejected":c.app_rejected}}},"screen":screen}),
+    )
+}
+
+fn report_request(p: &Value, c: &mut Core) -> Result<Value, (String, Value)> {
+    valid_params(p, &["v", "event", "pane"])?;
+    let event = p["event"].as_str().unwrap_or("");
+    let pane = p["pane"].as_str().unwrap_or("");
+    let Some((state, reason)) = hook_state(event) else {
+        c.hooks_rejected = c.hooks_rejected.saturating_add(1);
+        return Ok(json!({"v":1,"accepted":true}));
+    };
+    let id = c
+        .cfg
+        .agents
+        .iter()
+        .find(|(id, ac)| {
+            ac.kind == "claude"
+                && matches!(ac.structured, Some(StructuredSource::ClaudeHooks))
+                && c.agents
+                    .get(*id)
+                    .and_then(|a| a.terminal.as_ref())
+                    .is_some_and(|t| t.0 == pane)
+        })
+        .map(|(id, _)| id.clone());
+    let Some(id) = id.filter(|id| c.agents[id].absent.is_none()) else {
+        c.hooks_rejected = c.hooks_rejected.saturating_add(1);
+        return Ok(json!({"v":1,"accepted":true}));
+    };
+    let before = old(&c.agents[&id]);
+    let cfg = c.cfg.clone();
+    let a = c.agents.get_mut(&id).unwrap();
+    a.structured_state = Some(state.into());
+    a.structured_reason = reason.map(str::to_owned);
+    a.structured_at = Some(Instant::now());
+    a.structured_lost = false;
+    c.hooks_accepted = c.hooks_accepted.saturating_add(1);
+    c.hooks_last_ok = Some(crate::time::wall_ms());
+    c.hooks_last_error = None;
+    reconcile(a, &id, &cfg, Instant::now());
+    c.changed(&id, before);
+    Ok(json!({"v":1,"accepted":true}))
+}
+
+fn hook_state(event: &str) -> Option<(&'static str, Option<&'static str>)> {
+    match event {
+        "UserPromptSubmit" => Some(("working", None)),
+        "PermissionRequest" => Some(("blocked", Some("permission"))),
+        "Elicitation" => Some(("blocked", Some("user_input"))),
+        "Stop" | "StopFailure" | "SessionStart" => Some(("idle", None)),
+        "SessionEnd" => Some(("gone", None)),
+        _ => None,
+    }
+}
 fn dispatch(
     req: &Value,
     c: &mut Core,
@@ -1187,17 +1634,8 @@ fn dispatch(
                 Ok(json!({"v":1,"agents":a,"epoch":c.epoch,"head_seq":c.seq}))
             }
         }
-        "status" => {
-            if let Err(e) = valid_params(&p, &["v"]) {
-                Err(e)
-            } else {
-                c.snapshot();
-                let agents:serde_json::Map<String,Value>=c.agents.iter().map(|(id,a)|(id.clone(),json!({"state":a.state,"origin":a.origin,"marks":a.marks,"source":a.source,"last_seen":a.last_seen,"since":a.since,"blocked_reason":a.blocked_reason}))).collect();
-                Ok(
-                    json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"tmux":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error,"events":c.event_mode,"discover":{"on":c.cfg.discover,"found":c.discover_found,"ignored":c.discover_ignored}}}}),
-                )
-            }
-        }
+        "status" => status_result(&p, c),
+        "agent.report" => report_request(&p, c),
         "events.resume" => {
             if let Err(e) = valid_params(&p, &["v", "epoch", "last_seq"]) {
                 Err(e)
