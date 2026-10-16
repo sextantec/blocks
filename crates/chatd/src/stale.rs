@@ -76,7 +76,9 @@ struct Options {
     older_than: u64,
     bells: usize,
     result_older_than: u64,
-    sink: String,
+    sinks: Vec<String>,
+    tmux_bin: String,
+    tmux_socket: Option<String>,
     stamp_path: Option<PathBuf>,
     json: bool,
 }
@@ -90,7 +92,6 @@ struct LogData {
 pub fn run(args: &[String]) -> Result<(), Failure> {
     let opts = parse_stale_options(args)?;
     let cli = options(&opts)?;
-    let sink = cli.sink.as_str();
     let state_dir = opts
         .get("state-dir")
         .map(PathBuf::from)
@@ -99,9 +100,6 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
     let log_path = state_dir.join("log.jsonl");
     let log = File::open(&log_path).map_err(|e| unavailable(&log_path, e))?;
     let data = read_log(log)?;
-    if data.skipped > 0 {
-        eprintln!("skipped={}", data.skipped);
-    }
     let now = Utc::now();
     let stamp_path = cli
         .stamp_path
@@ -128,12 +126,51 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         }
     }
     let output = render_alerts(&alerts, cli.json)?;
-    write_sink(sink, output.as_bytes())?;
+    deliver_sinks(&cli, &alerts, data.skipped, &output)?;
     if alerts.iter().any(|a| a.new_alert) {
         Err(Failure::StaleAlerts)
     } else {
         Ok(())
     }
+}
+
+fn deliver_sinks(
+    cli: &Options,
+    alerts: &[Alert],
+    initial_skipped: usize,
+    output: &str,
+) -> Result<(), Failure> {
+    let tmux_entries: Vec<_> = alerts
+        .iter()
+        .map(|alert| crate::sink_tmux::Entry {
+            recipient: alert.name.clone(),
+            kind: alert.alert_type,
+            count: alert.count,
+            minutes: alert.oldest_min,
+        })
+        .collect();
+    let new_lines: Vec<String> = alerts
+        .iter()
+        .filter(|alert| alert.new_alert)
+        .map(format_alert)
+        .collect();
+    let mut skipped = initial_skipped;
+    for sink in &cli.sinks {
+        if sink == "tmux" {
+            skipped += crate::sink_tmux::run(
+                &cli.tmux_bin,
+                cli.tmux_socket.as_deref(),
+                &tmux_entries,
+                &new_lines,
+            );
+        } else {
+            write_sink(sink, output.as_bytes())?;
+        }
+    }
+    if skipped > 0 {
+        eprintln!("skipped={skipped}");
+    }
+    Ok(())
 }
 
 fn parse_stale_options(args: &[String]) -> Result<Opts, Failure> {
@@ -145,6 +182,8 @@ fn parse_stale_options(args: &[String]) -> Result<Opts, Failure> {
             "bells",
             "result-older-than",
             "notify",
+            "tmux-bin",
+            "tmux-socket",
             "stamp-file",
         ],
         &["json"],
@@ -159,21 +198,44 @@ fn load_stamp(path: Option<&Path>) -> Result<Stamp, Failure> {
 }
 
 fn options(opts: &Opts) -> Result<Options, Failure> {
-    let sink = opts.get("notify").unwrap_or("stdout");
-    if sink == "tmux" {
-        return Err(usage("--notify tmux ainda nao e suportado"));
+    let mut sinks = opts.all("notify");
+    if sinks.is_empty() {
+        sinks.push("stdout".to_string());
     }
-    if sink != "stdout" && !sink.starts_with("file:") {
-        return Err(usage("--notify deve ser stdout ou file:CAMINHO"));
+    if sinks.len() > 3 {
+        return Err(usage("--notify aceita no maximo tres sinks"));
     }
-    if sink == "file:" {
-        return Err(usage("--notify file: exige caminho"));
+    let mut unique = HashSet::new();
+    for sink in &sinks {
+        if !unique.insert(sink) {
+            return Err(usage("--notify repetido"));
+        }
+        if sink != "stdout" && sink != "tmux" && !sink.starts_with("file:") {
+            return Err(usage("--notify deve ser stdout, file:CAMINHO ou tmux"));
+        }
+        if sink == "file:" {
+            return Err(usage("--notify file: exige caminho"));
+        }
+    }
+    let has_tmux = sinks.iter().any(|sink| sink == "tmux");
+    if !has_tmux && (opts.get("tmux-bin").is_some() || opts.get("tmux-socket").is_some()) {
+        return Err(usage("--tmux-bin e --tmux-socket exigem --notify tmux"));
+    }
+    let tmux_bin = opts.get("tmux-bin").unwrap_or("tmux").to_string();
+    if tmux_bin.is_empty() {
+        return Err(usage("--tmux-bin exige caminho"));
+    }
+    let tmux_socket = opts.get("tmux-socket").map(str::to_string);
+    if tmux_socket.as_ref().is_some_and(String::is_empty) {
+        return Err(usage("--tmux-socket exige caminho"));
     }
     Ok(Options {
         older_than: number(opts, "older-than", 900)?,
         bells: number(opts, "bells", 2)? as usize,
         result_older_than: number(opts, "result-older-than", 3600)?,
-        sink: sink.to_string(),
+        sinks,
+        tmux_bin,
+        tmux_socket,
         stamp_path: opts.get("stamp-file").map(PathBuf::from),
         json: opts.flag("json"),
     })

@@ -26,6 +26,9 @@ Hoje o `chatd stale` detecta `[chat] parado: claude 7 pendente(s), mais antiga 3
 5. **` +K`** conta entradas omitidas, nao caracteres.
 6. **Trava:** limite de 5 s por chamada e 10 s no total; o teste aceita < 12 s.
 7. **S9 da v1.7 e revogado:** `--notify tmux` deixa de sair 2; o teste `s9_notify_tmux_sai_2_e_nao_executa_tmux` foi removido (cobertura em K1 a K14); `s9b` (sink fora da lista = 2) continua.
+9. **Nome de cliente** alem da regex nao pode ter segmento `..` (separado por `/`): endurecimento aceito (K6b).
+10. **`stdout`** so e padrao sem `--notify`; com `--notify tmux` sozinho nada vai a stdout (K2 pede os dois sinks para comparar a linha).
+11. **`due_expired`** (prazo vencido) aparece no `@chatd_stale` como `NOME Nr Mm`.
 8. **`--tmux-bin`/`--tmux-socket` sem o sink `tmux`** saem 2 (K11d/K11e); a prova de que as opcoes existem quando o sink esta ligado e K11a/K13.
 
 ## Parte B (PROPOSTA): portao do `agentd` na campainha tmux (muda o daemon)

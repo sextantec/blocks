@@ -390,9 +390,12 @@ fn k02_um_parado_grava_valor_exato_e_um_display_message_por_cliente() {
     let f = Falso::novo(&a);
     f.clientes(&["/dev/pts/1"]);
     let st = a.stamp("k2");
+    // `stdout` so e o padrao sem --notify (spec v1.9, regra 1): para comparar com a linha impressa, pede-se os dois sinks.
     let r = stale(
         &a,
         &[
+            "--notify",
+            "stdout",
             "--notify",
             "tmux",
             "--tmux-bin",
@@ -667,8 +670,14 @@ fn k07_assunto_e_corpo_nunca_chegam_a_nenhum_argumento_do_tmux() {
     );
     for c in &chamadas {
         for arg in c {
+            // O formato do list-clients (`#{client_name}`) e exigido pela spec v1.9, regra 2.2: unica excecao.
+            let arg_k7 = if arg == "#{client_name}" {
+                ""
+            } else {
+                arg.as_str()
+            };
             assert!(
-                !arg.contains("#{") && !arg.contains("#(") && !arg.contains(';'),
+                !arg_k7.contains("#{") && !arg_k7.contains("#(") && !arg_k7.contains(';'),
                 "argumento proibido: {arg}"
             );
             assert!(

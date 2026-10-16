@@ -10,6 +10,7 @@ mod hash;
 mod obligations;
 mod protocol;
 mod server;
+mod sink_tmux;
 mod stale;
 mod store;
 
@@ -31,7 +32,7 @@ chatd bind [--as N] [--mux herdr|tmux] [--pane ID] [--keepalive]\n     \
 chatd status [--as N] [--json]\n     \
 chatd whoami [--as N] [--profile N] [--json]\n     \
 chatd log --state-dir D [--tail N]\n     \
-chatd stale [--state-dir D] [--older-than SEC] [--bells N] [--result-older-than SEC] [--notify SINK] [--stamp-file F] [--json]\n     \
+chatd stale [--state-dir D] [--older-than SEC] [--bells N] [--result-older-than SEC] [--notify SINK ...] [--tmux-bin ARQ] [--tmux-socket CAMINHO] [--stamp-file F] [--json]\n     \
 chatd token new|revoke NOME --state-dir D | token list --state-dir D\n     \
 clientes: --socket, CHATD_SOCKET, --state-dir ou CHATD_STATE_DIR; identidade: --as/--from ou CHATD_AS; token: --token-file ou CHATD_TOKEN_FILE";
 
@@ -50,7 +51,7 @@ pub fn usage(m: impl Into<String>) -> Failure {
     Failure::Usage(m.into())
 }
 
-/// Opcoes `--nome valor` / `--nome=valor` (valores repetiveis para `ref`) e flags `--nome`.
+/// Opcoes `--nome valor` / `--nome=valor` (valores repetiveis para `ref` e `notify`) e flags `--nome`.
 pub struct Opts {
     values: BTreeMap<String, Vec<String>>,
     flags: Vec<String>,
@@ -105,7 +106,7 @@ pub fn parse_opts(args: &[String], values: &[&str], bools: &[&str]) -> Result<Op
                 }
             };
             let entry = o.values.entry(name.to_string()).or_default();
-            if !entry.is_empty() && name != "ref" {
+            if !entry.is_empty() && name != "ref" && name != "notify" {
                 return Err(usage(format!("--{name} repetido")));
             }
             entry.push(val);
