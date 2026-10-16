@@ -14,7 +14,7 @@ Um arquivo `log.jsonl` de **commits** de acrescimo, um dono por diretorio, com r
 - **G6. Fail-closed:** falha de escrita ou de `sync` torna o log `broken` ate o processo reiniciar (secao 5).
 
 ## 2. Layout e permissoes
-Diretorio de estado `D` (modo 0700) com `log.jsonl` (0600) e `LOCK` (0600). Na abertura: diretorio com qualquer bit de grupo/outros, ou arquivo com `mode & 0o077 != 0`, ou arquivo que nao e regular, ou symlink (abertura com `O_NOFOLLOW`) = recusa (`insecure_permissions`). Criacao: arquivos novos com 0600 e `fsync` do diretorio depois de criar `log.jsonl`. O dono do arquivo deve ser o uid do processo.
+Diretorio de estado `D` (modo 0700) com `log.jsonl` (0600) e `LOCK` (0600). Na abertura: diretorio com qualquer bit de grupo/outros, ou arquivo com `mode & 0o077 != 0`, ou arquivo que nao e regular, ou symlink (abertura com `O_NOFOLLOW`) = recusa (`insecure_permissions`). Criacao: arquivos novos com 0600 e `fsync` do diretorio depois de criar `log.jsonl`. O dono do arquivo deve ser o uid do processo, obtido **sem `unsafe`** por `std::fs::metadata("/proc/self")` e `MetadataExt::uid()` (Linux; mesma tecnica do `chatd`, `crates/chatd/src/codex_queue.rs:56-58`); `unsafe` fica restrito ao `flock` (`libc`).
 
 ## 3. Formato do commit
 Uma linha UTF-8 terminada em `\n`, objeto JSON, chaves exatas (desconhecida = corrupcao):
