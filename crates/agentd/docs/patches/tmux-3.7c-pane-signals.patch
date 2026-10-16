@@ -1,0 +1,73 @@
+--- a/format.c
++++ b/format.c
+@@ -1758,6 +1758,29 @@
+ 	return (NULL);
+ }
+ 
++/* Callback for cursor_attrs: attributes of the cell under the cursor. */
++static void *
++format_cb_cursor_attrs(struct format_tree *ft)
++{
++	struct window_pane	*wp = ft->wp;
++	struct grid_cell	 gc;
++
++	if (wp == NULL)
++		return (NULL);
++
++	grid_view_get_cell(wp->base.grid, wp->base.cx, wp->base.cy, &gc);
++	return (xstrdup(attributes_tostring(gc.attr)));
++}
++
++/* Callback for pane_last_output. */
++static void *
++format_cb_pane_last_output(struct format_tree *ft)
++{
++	if (ft->wp != NULL)
++		return (&ft->wp->last_output_time);
++	return (NULL);
++}
++
+ /* Callback for cursor_very_visible. */
+ static void *
+ format_cb_cursor_very_visible(struct format_tree *ft)
+@@ -3293,6 +3316,9 @@
+ 	{ "config_files", FORMAT_TABLE_STRING,
+ 	  format_cb_config_files
+ 	},
++	{ "cursor_attrs", FORMAT_TABLE_STRING,
++	  format_cb_cursor_attrs
++	},
+ 	{ "cursor_blinking", FORMAT_TABLE_STRING,
+ 	  format_cb_cursor_blinking
+ 	},
+@@ -3470,6 +3496,9 @@
+ 	{ "pane_last", FORMAT_TABLE_STRING,
+ 	  format_cb_pane_last
+ 	},
++	{ "pane_last_output", FORMAT_TABLE_TIME,
++	  format_cb_pane_last_output
++	},
+ 	{ "pane_left", FORMAT_TABLE_STRING,
+ 	  format_cb_pane_left
+ 	},
+--- a/tmux.h
++++ b/tmux.h
+@@ -1252,6 +1252,8 @@
+ 	u_int		 id;
+ 	u_int		 active_point;
+ 
++	struct timeval	 last_output_time;
++
+ 	struct window	*window;
+ 	struct options	*options;
+ 
+--- a/window.c
++++ b/window.c
+@@ -1154,6 +1154,7 @@
+ 		}
+ 	}
+ 
++	gettimeofday(&wp->last_output_time, NULL);
+ 	log_debug("%%%u has %zu bytes", wp->id, size);
+ 	TAILQ_FOREACH(c, &clients, entry) {
+ 		if (c->session != NULL && (c->flags & CLIENT_CONTROL))

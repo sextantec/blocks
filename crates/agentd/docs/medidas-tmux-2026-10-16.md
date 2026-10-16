@@ -118,3 +118,19 @@ Harness: `scratchpad/lab-tmux/lib.sh`, `sampler2.sh`, `analyse.py`, `analyse-pi.
 - **Marca `background`** (subagente ativo com principal livre) no Claude; o estado do agente principal continua `idle`.
 - Cursor e fila: mensagem enfileirada não é rascunho; ter regra para `Press up to edit queued messages` (Claude), `Steering:` (Pi).
 - Tela ociosa estável no Codex e no Pi; no Claude o rodapé muda por modo, mas não por tempo.
+
+
+## Eventos do modo de controle (2026-10-16 tarde)
+Cliente de teste em Python (`tmux -C attach -f ignore-size`, stdin so com `refresh-client -B` e `capture-pane`), 1 turno por agente em pasta ja confiavel, debounce 150 ms. Resumo e numeros: secao 4A da `spec-rev5.md`. Detalhes que nao cabem la:
+
+| Agente | Boot | Ocioso 45 s | Turno (prompt "crie ola.txt") | Pico |
+|---|---|---|---|---|
+| Claude | 11 eventos, 2 KB | 3 eventos, 439 B (6,8 s, 14,8 s, 22,8 s: troca do `Try "..."`) | 34 eventos, 5,9 KB em 3,6 s; dialogo `Do you want to create ola.txt?` visto 4,04 s depois do prompt | 3,4 KB/s |
+| Codex | 38 eventos, 20 KB | 0 | 226 eventos, 10,7 KB em 3,5 s (titulo com spinner: 52 OSC 0/2); aprovacao vista 3,9 s depois | 11,2 KB/s |
+| Pi | 14 eventos, 6,6 KB | 0 | 96 eventos, 67 KB em 7,2 s (resposta sem ferramenta) | 9,4 KB/s |
+
+- Assinatura de formato (`refresh-client -B`, no maximo 1 por segundo) entregou titulo, comando e `pane_pb_state`; no Codex o titulo com spinner ora aparece, ora nao (a subscricao amostra a 1 s e perderia a lacuna; o ciclo com `list-panes` apos `%output` e mais fiel).
+- Armadilha: cliente anexado com `-r` => `send-keys` de outro processo falha com `client is read-only` (o tmux escolhe o ultimo cliente da sessao como alvo). Com `-f ignore-size` funciona e a janela mantem o tamanho.
+- Cliente `-r` executou `set-option` e `kill-pane` (so teclas e troca/anexo/desanexo sao bloqueados; `CMD_READONLY` no codigo).
+- Variavel de formato desconhecida devolve vazio; `synchronized_output_flag` existe (valor 0 nas amostras).
+- Limitacoes: um turno por agente, Haiku/Luna, tmux local, laco de 50 ms do cliente de teste soma ao debounce; CPU do cliente nao medida.
