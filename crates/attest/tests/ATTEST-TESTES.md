@@ -58,3 +58,17 @@ Cada item abaixo esta marcado `AMBIGUO` no codigo. Nenhum comportamento foi inve
 19. **Timeout e processo filho.** O spec nao diz se o attest mata o comando que estourou o timeout. O teste so mede o tempo total do attest.
 20. **Valores de `--result` em `note`.** O spec define `pass|fail`. Os testes usam so `pass` e `fail`, sem testar valor invalido, porque o spec nao diz o codigo de saida para valor invalido.
 21. **Campos `effort` e `model`.** `effort` e opcional e nao e testado. `model` e sempre passado.
+
+## Emendas A22/A23
+
+Arquivo: `crates/attest/tests/attest_emendas.rs` (separado de `attest_v0.rs`, que nao foi editado). Fonte: `docs/attest-spec-v0.md`, itens 18 e 19 das emendas apos a consulta ao Astra. Escritos sem ler `crates/attest/src/**`.
+
+| Teste | Item | O que afirma |
+| --- | --- | --- |
+| `a22_nao_grava_objetos_no_git_real` | A22 | com `segredo.env` nao ignorado e conteudo unico: `count-objects` (count e in-pack) e a lista de objetos do `.git` real iguais antes e depois de `run`, `note`, `check` e `footer`; o conteudo unico nao aparece em objeto. Controles: `hash-object -w` aumenta a contagem; conteudo commitado aparece na busca; alterar o arquivo muda o `tree` |
+| `a23_tree_antes_e_depois_e_mutated` | A23 (a) | `sh -c 'echo x >> a.txt'`: `tree_before` = arvore antes, `tree` != `tree_before`, `mutated: true`; `check --tree auto` da `gate` `ok` (usa `tree`) |
+| (mesmo teste) | A23 (b) | `printf`: `tree_before == tree`, `mutated: false` |
+| (mesmo teste) | A23 (c) | `note` grava `tree` (da arvore atual) e nao grava `tree_before` nem `mutated` (inferido de "note grava so tree") |
+| (mesmo teste) | A23 (d) | le `log.jsonl`: `v`, `seq` 1..3, `mutated` = (`tree_before` != `tree`) em cada `run` |
+
+Resultado da primeira rodada: 2 passam (`cargo test --offline -p attest --test attest_emendas`); clippy `-D warnings` e fmt limpos. Ambiguidades: (1) `mutated` ausente no `note` e inferencia do "grava so tree"; (2) `check` com `--tree auto` e lido como arvore atual no momento do check; (3) o teste de A22 nao cobre `verify` nem `show`, fora do item.
