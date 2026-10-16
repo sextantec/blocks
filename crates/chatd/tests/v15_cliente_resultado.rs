@@ -545,7 +545,8 @@ fn c1_com_variaveis_da_v14_a_saida_e_igual_regressao_zero() {
 fn c2_default_profile_nao_fornece_mais_identidade_v16() {
     let a = Amb::novo();
     let tok = a.p().join("token-fifo-c2.tok");
-    let c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(tok.as_os_str())).unwrap();
+    let c =
+        std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(tok.as_os_str())).unwrap();
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
     grava_cfg(
         &a,
@@ -623,7 +624,11 @@ fn c3_as_de_flag_e_env_vencem_o_perfil() {
     assert_eq!(txt(&j2, "as"), "outro-env", "CHATD_AS deve vencer o perfil");
     // v1.6: sem flag, env nem --profile, default_profile nao escolhe perfil: as fica null.
     let (_, j3) = whoami_json(&a, &["--profile", "claude"], &[]);
-    assert_eq!(txt(&j3, "as"), A, "sem flag nem env, vale o perfil escolhido");
+    assert_eq!(
+        txt(&j3, "as"),
+        A,
+        "sem flag nem env, vale o perfil escolhido"
+    );
 }
 
 #[test]
@@ -750,7 +755,10 @@ fn c4_profile_flag_e_env_selecionam_o_perfil() {
         "CHATD_PROFILE=codex deve dar as=codex-web"
     );
     let (_, j3) = whoami_json(&a, &[], &[]);
-    assert!(j3["as"].is_null(), "sem escolha explicita, as e null (v1.6): {j3}");
+    assert!(
+        j3["as"].is_null(),
+        "sem escolha explicita, as e null (v1.6): {j3}"
+    );
 }
 
 #[test]

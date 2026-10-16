@@ -372,9 +372,25 @@ fn tem_marca(t: &str) -> bool {
 /// s21-2 e PEDIDO aceito e resultado, sem alerta. Usado pelos testes S21.
 fn log_com_marcas(st: &Path) {
     let mut d = Diario::novo(st);
-    d.registro("PEDIDO", "s21-1", A, C, MARCA_ASSUNTO, MARCA_CORPO, &ha_min(61));
+    d.registro(
+        "PEDIDO",
+        "s21-1",
+        A,
+        C,
+        MARCA_ASSUNTO,
+        MARCA_CORPO,
+        &ha_min(61),
+    );
     d.aceite_com_nota("s21-1", &ha_min(61), MARCA_NOTA);
-    d.registro("PEDIDO", "s21-2", A, C, MARCA_ASSUNTO, MARCA_CORPO, &ha_min(61));
+    d.registro(
+        "PEDIDO",
+        "s21-2",
+        A,
+        C,
+        MARCA_ASSUNTO,
+        MARCA_CORPO,
+        &ha_min(61),
+    );
     d.aceite("s21-2", &ha_min(61));
     d.resultado_com("s21-2", &ha_min(61), MARCA_NOTA);
 }
@@ -394,7 +410,10 @@ fn s13a_pedido_aceito_ha_59_min_sem_resultado_nao_avisa() {
     d.aceite("s13-1", &ha_min(59));
     let r = stale(&a, &st, &[]);
     assert_eq!(r.code, Some(0), "59 min < 3600 s nao esta parado: {r:?}");
-    assert!(r.stdout.trim().is_empty(), "nada a avisar, nenhuma linha: {r:?}");
+    assert!(
+        r.stdout.trim().is_empty(),
+        "nada a avisar, nenhuma linha: {r:?}"
+    );
 }
 
 #[test]
@@ -405,14 +424,25 @@ fn s13b_pedido_aceito_ha_61_min_sem_resultado_sai_6_com_linha() {
     d.registro("PEDIDO", "s13-2", A, C, "assunto", "corpo", &ha_min(61));
     d.aceite("s13-2", &ha_min(61));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(6), "61 min > 3600 s: parado por resultado = saida 6: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(6),
+        "61 min > 3600 s: parado por resultado = saida 6: {r:?}"
+    );
     let ls = sem_resultado(&r.stdout);
-    assert_eq!(ls.len(), 1, "uma linha `sem resultado` por destinatario e tipo: {r:?}");
+    assert_eq!(
+        ls.len(),
+        1,
+        "uma linha `sem resultado` por destinatario e tipo: {r:?}"
+    );
     let p = le_sem_resultado(&ls[0]);
     assert_eq!(p.nome, C, "{p:?}");
     assert_eq!(p.pedidos, 1, "{p:?}");
     // AMBIGUO: M em minutos inteiros, arredondado ou truncado; 61 min reais aceitam 60 a 62.
-    assert!((60..=62).contains(&p.mais_antigo_min), "M fora de 60..=62: {p:?}");
+    assert!(
+        (60..=62).contains(&p.mais_antigo_min),
+        "M fora de 60..=62: {p:?}"
+    );
     assert!(
         paradas(&r.stdout).is_empty(),
         "sem pendencia de aceite, nao ha linha `parado`: {r:?}"
@@ -429,7 +459,11 @@ fn s13c_idade_do_resultado_conta_do_aceite_e_nao_do_registro() {
     d.registro("PEDIDO", "s13-3", A, C, "assunto", "corpo", &ha_min(180));
     d.aceite("s13-3", &ha_min(59));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(0), "aceito ha 59 min: nada, mesmo registrado ha 3 h: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "aceito ha 59 min: nada, mesmo registrado ha 3 h: {r:?}"
+    );
     assert!(r.stdout.trim().is_empty(), "{r:?}");
 }
 
@@ -445,7 +479,11 @@ fn s14a_aviso_e_resposta_aceitos_ha_3_h_sem_resultado_nao_avisam() {
     d.registro("RESPOSTA", "s14-2", A, C, "assunto", "corpo", &ha_min(180));
     d.aceite("s14-2", &ha_min(180));
     let r = stale(&a, &st, &[]);
-    assert_eq!(r.code, Some(0), "AVISO e RESPOSTA nao pedem resultado: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "AVISO e RESPOSTA nao pedem resultado: {r:?}"
+    );
     assert!(r.stdout.trim().is_empty(), "nada a avisar: {r:?}");
 }
 
@@ -465,7 +503,11 @@ fn s14b_aviso_e_resposta_nao_entram_na_contagem_de_pedidos() {
     assert_eq!(r.code, Some(6), "{r:?}");
     let ls = sem_resultado(&r.stdout);
     assert_eq!(ls.len(), 1, "{r:?}");
-    assert_eq!(le_sem_resultado(&ls[0]).pedidos, 1, "so o PEDIDO conta: {r:?}");
+    assert_eq!(
+        le_sem_resultado(&ls[0]).pedidos,
+        1,
+        "so o PEDIDO conta: {r:?}"
+    );
 }
 
 // ---------- S15: PERGUNTA conta como PEDIDO ----------
@@ -485,7 +527,10 @@ fn s15_pergunta_aceita_ha_61_min_sem_resultado_conta_como_pedido() {
     assert_eq!(p.nome, C, "{p:?}");
     assert_eq!(p.pedidos, 1, "PERGUNTA entra na contagem N: {p:?}");
     // AMBIGUO: M em minutos inteiros, arredondado ou truncado; 61 min reais aceitam 60 a 62.
-    assert!((60..=62).contains(&p.mais_antigo_min), "M fora de 60..=62: {p:?}");
+    assert!(
+        (60..=62).contains(&p.mais_antigo_min),
+        "M fora de 60..=62: {p:?}"
+    );
 }
 
 // ---------- S16: resulted encerra o episodio; nova mensagem reavisa; stamp-file ----------
@@ -508,7 +553,10 @@ fn s16_resulted_encerra_o_episodio_e_nova_mensagem_reavisa() {
     let ls = sem_resultado(&r1.stdout);
     assert_eq!(ls.len(), 1, "{r1:?}");
     assert_eq!(le_sem_resultado(&ls[0]).pedidos, 1, "{r1:?}");
-    assert!(stamp.exists(), "stamp-file deve existir apos o primeiro aviso");
+    assert!(
+        stamp.exists(),
+        "stamp-file deve existir apos o primeiro aviso"
+    );
     assert_eq!(modo_de(&stamp), 0o600, "stamp-file deve ser 0600");
 
     // Mesmo episodio, ainda sem resultado: nao reavisa (linha deduplicada omitida, nada novo, saida 0).
@@ -554,7 +602,11 @@ fn s17_dois_tipos_no_mesmo_destinatario_geram_duas_linhas_com_dedup_independente
 
     let r1 = stale(&a, &st, &extra);
     assert_eq!(r1.code, Some(6), "{r1:?}");
-    assert_eq!(chat_linhas(&r1.stdout).len(), 2, "duas linhas, uma por tipo: {r1:?}");
+    assert_eq!(
+        chat_linhas(&r1.stdout).len(),
+        2,
+        "duas linhas, uma por tipo: {r1:?}"
+    );
     let parados_1 = paradas(&r1.stdout);
     let sem_1 = sem_resultado(&r1.stdout);
     assert_eq!(parados_1.len(), 1, "{r1:?}");
@@ -585,11 +637,19 @@ fn s18_result_older_than_invalido_sai_2() {
     d.aceite("s18-1", &ha_min(61));
     // Controle: com um valor valido o mesmo estado da 6. Sem isso, a saida 2 poderia ser so erro de uso geral.
     let ctl = stale(&a, &st, &["--result-older-than", "3600"]);
-    assert_eq!(ctl.code, Some(6), "controle com valor valido deve dar 6: {ctl:?}");
+    assert_eq!(
+        ctl.code,
+        Some(6),
+        "controle com valor valido deve dar 6: {ctl:?}"
+    );
     for v in ["0", "-5", "abc"] {
         let opt = format!("--result-older-than={v}");
         let r = stale(&a, &st, &[opt.as_str()]);
-        assert_eq!(r.code, Some(2), "--result-older-than={v} deve sair 2: {r:?}");
+        assert_eq!(
+            r.code,
+            Some(2),
+            "--result-older-than={v} deve sair 2: {r:?}"
+        );
     }
 }
 
@@ -614,25 +674,45 @@ fn s19_json_um_objeto_por_destinatario_e_tipo_e_repeticao_sem_alerta_novo() {
     let r1 = stale(&a, &st, &extra);
     assert_eq!(r1.code, Some(6), "{r1:?}");
     let objs = objetos_json(&r1.stdout);
-    assert_eq!(objs.len(), 2, "um objeto por destinatario e tipo parado: {r1:?}");
+    assert_eq!(
+        objs.len(),
+        2,
+        "um objeto por destinatario e tipo parado: {r1:?}"
+    );
     for o in &objs {
-        assert_eq!(o.get("new_alert"), Some(&json!(true)), "primeiro aviso: new_alert true: {o}");
-        assert!(o.to_string().contains(&format!("\"{C}\"")), "destinatario ausente no objeto: {o}");
+        assert_eq!(
+            o.get("new_alert"),
+            Some(&json!(true)),
+            "primeiro aviso: new_alert true: {o}"
+        );
+        assert!(
+            o.to_string().contains(&format!("\"{C}\"")),
+            "destinatario ausente no objeto: {o}"
+        );
     }
     let tipos: Vec<Option<String>> = objs.iter().map(campo_tipo).collect();
     assert!(
         tipos.iter().all(|t| t.is_some()),
         "AMBIGUO: campo de tipo (kind ou type) ausente: {objs:?}"
     );
-    assert_ne!(tipos[0], tipos[1], "os dois objetos devem ter tipos diferentes: {objs:?}");
+    assert_ne!(
+        tipos[0], tipos[1],
+        "os dois objetos devem ter tipos diferentes: {objs:?}"
+    );
 
     // Repeticao do mesmo episodio: os objetos continuam (inclusive os ja avisados), new_alert false, saida 0.
     let r2 = stale(&a, &st, &extra);
-    assert_eq!(r2.code, Some(0), "repeticao sem aviso novo = saida 0: {r2:?}");
+    assert_eq!(
+        r2.code,
+        Some(0),
+        "repeticao sem aviso novo = saida 0: {r2:?}"
+    );
     let objs2 = objetos_json(&r2.stdout);
     assert_eq!(objs2.len(), 2, "objetos inclusive os ja avisados: {r2:?}");
     assert!(
-        objs2.iter().all(|o| o.get("new_alert") == Some(&json!(false))),
+        objs2
+            .iter()
+            .all(|o| o.get("new_alert") == Some(&json!(false))),
         "repeticao: new_alert false em todos: {objs2:?}"
     );
 }
@@ -651,7 +731,11 @@ fn s20_pendente_e_aceita_sem_resultado_geram_linhas_distintas_sem_misturar_conta
     d.aceite("s20-2", &ha_min(61));
     let r = stale(&a, &st, &[]);
     assert_eq!(r.code, Some(6), "{r:?}");
-    assert_eq!(chat_linhas(&r.stdout).len(), 2, "duas linhas distintas: {r:?}");
+    assert_eq!(
+        chat_linhas(&r.stdout).len(),
+        2,
+        "duas linhas distintas: {r:?}"
+    );
     let parados_l = paradas(&r.stdout);
     let sem_l = sem_resultado(&r.stdout);
     assert_eq!(parados_l.len(), 1, "{r:?}");
@@ -685,7 +769,11 @@ fn s21a_marcas_nao_aparecem_em_stdout_stderr_nem_stamp() {
     let sp = s(&stamp).to_string();
     let r = stale(&a, &st, &["--stamp-file", sp.as_str()]);
     assert_eq!(r.code, Some(6), "{r:?}");
-    assert_eq!(sem_resultado(&r.stdout).len(), 1, "a execucao precisa ter produzido a linha: {r:?}");
+    assert_eq!(
+        sem_resultado(&r.stdout).len(),
+        1,
+        "a execucao precisa ter produzido a linha: {r:?}"
+    );
     let sf = fs::read_to_string(&stamp).expect("o stamp-file deve ser criado pelo verificador");
     assert!(!tem_marca(&r.stdout), "vazou em stdout: {r:?}");
     assert!(!tem_marca(&r.stderr), "vazou em stderr: {r:?}");
@@ -701,7 +789,10 @@ fn s21b_marcas_nao_aparecem_com_json() {
     let sp = s(&stamp).to_string();
     let r = stale(&a, &st, &["--json", "--stamp-file", sp.as_str()]);
     assert_eq!(r.code, Some(6), "{r:?}");
-    assert!(!objetos_json(&r.stdout).is_empty(), "a saida --json precisa ter objetos: {r:?}");
+    assert!(
+        !objetos_json(&r.stdout).is_empty(),
+        "a saida --json precisa ter objetos: {r:?}"
+    );
     assert!(!tem_marca(&r.stdout), "vazou com --json: {r:?}");
     assert!(!tem_marca(&r.stderr), "vazou em stderr com --json: {r:?}");
     let sf = fs::read_to_string(&stamp).expect("stamp-file");
@@ -718,7 +809,10 @@ fn s21c_marcas_nao_aparecem_no_sink_de_arquivo() {
     let r = stale(&a, &st, &["--notify", notify.as_str()]);
     assert_eq!(r.code, Some(6), "{r:?}");
     let conteudo = fs::read_to_string(&alertas).expect("o sink file deve receber a linha");
-    assert!(!conteudo.trim().is_empty(), "linha de alerta ausente no arquivo");
+    assert!(
+        !conteudo.trim().is_empty(),
+        "linha de alerta ausente no arquivo"
+    );
     assert!(!tem_marca(&conteudo), "vazou no arquivo: {conteudo}");
 }
 
@@ -758,9 +852,24 @@ fn s22_nao_conecta_ao_socket_e_nao_abre_token_com_pendente_e_resultado() {
         ],
     );
     // A execucao precisa chegar ao fim e produzir as duas linhas (senao o teste nao prova nada).
-    assert_eq!(r.code, Some(6), "bloqueou ou nao chegou ao fim (um FIFO de token foi aberto?): {r:?}");
-    assert_eq!(paradas(&r.stdout).len(), 1, "caminho de aceite nao rodou: {r:?}");
-    assert_eq!(sem_resultado(&r.stdout).len(), 1, "caminho de resultado nao rodou: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(6),
+        "bloqueou ou nao chegou ao fim (um FIFO de token foi aberto?): {r:?}"
+    );
+    assert_eq!(
+        paradas(&r.stdout).len(),
+        1,
+        "caminho de aceite nao rodou: {r:?}"
+    );
+    assert_eq!(
+        sem_resultado(&r.stdout).len(),
+        1,
+        "caminho de resultado nao rodou: {r:?}"
+    );
     ouvinte.set_nonblocking(true).unwrap();
-    assert!(ouvinte.accept().is_err(), "o stale conectou ao socket do daemon: {r:?}");
+    assert!(
+        ouvinte.accept().is_err(),
+        "o stale conectou ao socket do daemon: {r:?}"
+    );
 }

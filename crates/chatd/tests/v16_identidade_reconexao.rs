@@ -799,9 +799,16 @@ fn i7_sem_variaveis_com_default_profile_whoami_sai_0_com_as_nulo_e_status_sai_2(
     let a = Amb::novo();
     grava_cfg(&a, &cfg_jabbur(&a));
     let (r, j) = whoami_json(&a, &[], &[]);
-    assert_eq!(r.code, Some(0), "whoami e diagnostico, nao falha sem identidade: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "whoami e diagnostico, nao falha sem identidade: {r:?}"
+    );
     assert!(j["as"].is_null(), "as deve ser null: {j}");
-    assert!(j["profile"].is_null(), "profile null sem perfil escolhido: {j}");
+    assert!(
+        j["profile"].is_null(),
+        "profile null sem perfil escolhido: {j}"
+    );
     assert_eq!(origem(&j, "as"), "unset", "sources.as deve ser unset: {j}");
     assert!(
         r.stderr.contains(AVISO_DEFAULT),
@@ -817,7 +824,11 @@ fn i7_sem_variaveis_com_default_profile_whoami_sai_0_com_as_nulo_e_status_sai_2(
 fn i9_status_sem_identidade_contra_auth_off_sai_0_e_nao_abre_o_token() {
     let a = Amb::novo();
     fs::create_dir_all(a.state()).unwrap();
-    let cfg = escreve(&a.p().join("srv-off-i9.json"), &cfg_sem_auth().to_string(), 0o600);
+    let cfg = escreve(
+        &a.p().join("srv-off-i9.json"),
+        &cfg_sem_auth().to_string(),
+        0o600,
+    );
     let _srv = Srv::sobe(&a, &a.state(), &cfg, "auth-off-i9");
     // default_profile com token em FIFO: se o cliente abrir o token, bloqueia e o roda estoura (code None).
     let tok = a.p().join("token-fifo-i9.tok");
@@ -833,8 +844,15 @@ fn i9_status_sem_identidade_contra_auth_off_sai_0_e_nao_abre_o_token() {
     );
     let sock = a.socket().display().to_string();
     let r = roda(&a, &["status"], &[("CHATD_SOCKET", sock.as_str())]);
-    assert_eq!(r.code, Some(0), "status sem identidade contra auth off: {r:?}");
-    assert!(r.stderr.contains(AVISO_DEFAULT), "o aviso de default_profile continua: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "status sem identidade contra auth off: {r:?}"
+    );
+    assert!(
+        r.stderr.contains(AVISO_DEFAULT),
+        "o aviso de default_profile continua: {r:?}"
+    );
 }
 
 // ---------- I8: identidade explicita (--from) sem token funciona com daemon auth off; token nao e aberto ----------
@@ -857,7 +875,11 @@ fn cfg_sem_auth() -> Value {
 fn i8_identidade_explicita_sem_token_funciona_com_auth_off_e_nao_abre_o_token() {
     let a = Amb::novo();
     fs::create_dir_all(a.state()).unwrap();
-    let cfg = escreve(&a.p().join("srv-off.json"), &cfg_sem_auth().to_string(), 0o600);
+    let cfg = escreve(
+        &a.p().join("srv-off.json"),
+        &cfg_sem_auth().to_string(),
+        0o600,
+    );
     let _srv = Srv::sobe(&a, &a.state(), &cfg, "auth-off");
     // default_profile com token em FIFO: se o cliente abrir o token, bloqueia e o roda estoura (code None).
     let tok = a.p().join("token-fifo-i8.tok");
@@ -876,13 +898,31 @@ fn i8_identidade_explicita_sem_token_funciona_com_auth_off_e_nao_abre_o_token() 
     let r = roda(
         &a,
         &[
-            "send", "--from", A, "--to", B, "--kind", "AVISO", "--subject", "s", "--body", "c",
-            "--id", "i8-1",
+            "send",
+            "--from",
+            A,
+            "--to",
+            B,
+            "--kind",
+            "AVISO",
+            "--subject",
+            "s",
+            "--body",
+            "c",
+            "--id",
+            "i8-1",
         ],
         &envs,
     );
-    assert_eq!(r.code, Some(0), "--from explicito com auth off e sem token: {r:?}");
-    assert!(r.stderr.contains(AVISO_DEFAULT), "o aviso continua valendo: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(0),
+        "--from explicito com auth off e sem token: {r:?}"
+    );
+    assert!(
+        r.stderr.contains(AVISO_DEFAULT),
+        "o aviso continua valendo: {r:?}"
+    );
     let i = roda(&a, &["inbox", "--json", "--as", B], &envs);
     assert_eq!(i.code, Some(0), "inbox --as sem token com auth off: {i:?}");
 }
@@ -930,7 +970,11 @@ fn r1b_queda_depois_do_envio_nao_repete_a_mensagem() {
         vec!["r16-2".to_string()],
         "a requisicao ja enviada nao pode ser repetida"
     );
-    assert_eq!(r.code, Some(4), "queda apos o envio: sai 4 sem repetir: {r:?}");
+    assert_eq!(
+        r.code,
+        Some(4),
+        "queda apos o envio: sai 4 sem repetir: {r:?}"
+    );
     assert!(
         format!("{}{}", r.stdout, r.stderr).contains("r16-2"),
         "o id da mensagem deve sair na saida (Esclarecimento 3): {r:?}"
@@ -969,7 +1013,10 @@ fn r2b_socket_obsoleto_sem_ouvinte_recusa_a_conexao_e_sai_4() {
     let r = como(&a, A, &["status"]);
     let el = t.elapsed();
     assert_eq!(r.code, Some(4), "ECONNREFUSED tambem e daemon fora: {r:?}");
-    assert!(el >= Duration::from_millis(1200), "saiu cedo demais: {el:?}");
+    assert!(
+        el >= Duration::from_millis(1200),
+        "saiu cedo demais: {el:?}"
+    );
     assert!(el <= Duration::from_secs(3), "esperou demais: {el:?}");
 }
 
@@ -1178,8 +1225,14 @@ fn r6a_watch_sem_reconnect_primeiro_retry_ate_1s_e_nenhum_intervalo_acima_de_5s(
     let a = Amb::novo();
     // Backoff 200 ms a 5 s; 12 s de observacao cobrem o teto.
     let g = intervalos_de_reconexao(&a, &[], Duration::from_secs(12));
-    assert!(g.len() >= 3, "o watch deveria reconectar varias vezes: {g:?}");
-    assert!(g[0] <= 1.0 + 0.05, "primeiro retry sem --reconnect deve ser <= 1 s: {g:?}");
+    assert!(
+        g.len() >= 3,
+        "o watch deveria reconectar varias vezes: {g:?}"
+    );
+    assert!(
+        g[0] <= 1.0 + 0.05,
+        "primeiro retry sem --reconnect deve ser <= 1 s: {g:?}"
+    );
     assert!(
         g.iter().all(|&x| x <= 5.0 + 0.5),
         "nenhum intervalo acima de 5 s: {g:?}"
@@ -1190,7 +1243,16 @@ fn r6a_watch_sem_reconnect_primeiro_retry_ate_1s_e_nenhum_intervalo_acima_de_5s(
 fn r6b_watch_com_reconnect_segue_a_v12_primeiro_1s_depois_2s() {
     let a = Amb::novo();
     let g = intervalos_de_reconexao(&a, &["--reconnect"], Duration::from_secs(8));
-    assert!(g.len() >= 2, "o watch com --reconnect deveria reconectar: {g:?}");
-    assert!(g[0] >= 1.0 - 0.05, "primeiro retry com --reconnect >= 1 s: {g:?}");
-    assert!(g[1] >= 2.0 - 0.05, "segundo retry com --reconnect >= 2 s: {g:?}");
+    assert!(
+        g.len() >= 2,
+        "o watch com --reconnect deveria reconectar: {g:?}"
+    );
+    assert!(
+        g[0] >= 1.0 - 0.05,
+        "primeiro retry com --reconnect >= 1 s: {g:?}"
+    );
+    assert!(
+        g[1] >= 2.0 - 0.05,
+        "segundo retry com --reconnect >= 2 s: {g:?}"
+    );
 }
