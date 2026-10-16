@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.301
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /work/proj
+
+
+❯ Rode o comando bash: ls -la /etc/hostname
+
+  Listed 1 directory
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Worked for 2s · done 6:04 AM
+
+❯ Use a ferramenta AskUserQuestion para me perguntar qual cor eu prefiro, com 3 opcoes: azul, verde, vermelho.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Cor
+
+Qual cor você prefere?
+
+❯ 1. Azul
+     Tom azul
+  2. Verde
+     Tom verde
+  3. Vermelho
+     Tom vermelho
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

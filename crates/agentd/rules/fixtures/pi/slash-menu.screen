@@ -1,0 +1,50 @@
+
+ A ideia de multiplexar terminais não começou com o tmux. O GNU Screen, lançado no fim dos anos 1980, já permitia separar uma sessão da conexão atual e retomá-la depois. Essa capacidade tornou-se
+ especialmente útil para administradores de sistemas e desenvolvedores que acessavam máquinas remotas por conexões instáveis. O tmux apareceu em 2007, criado por Nicholas Marriott, com objetivos
+ semelhantes, mas também com uma arquitetura própria e uma configuração mais flexível.
+
+ Um aspecto importante do tmux é a separação entre o servidor, que mantém as sessões e os programas em execução, e os clientes, que exibem essas sessões. Quando alguém se desconecta, o servidor
+ continua ativo; mais tarde, a pessoa pode reconectar-se e encontrar o trabalho no mesmo ponto. Esse modelo transformou o terminal de uma janela efêmera em um ambiente persistente. Também permitiu
+ que múltiplos clientes acompanhassem uma mesma sessão, recurso útil para colaboração e suporte remoto.
+
+ Com o tempo, o tmux ganhou espaço entre usuários de Unix, Linux e macOS. Seu sistema de sessões, janelas e painéis oferece diferentes níveis de organização: uma sessão pode reunir um projeto, suas
+ janelas podem separar tarefas, e cada janela pode ser dividida em painéis. Atalhos de teclado, arquivos de configuração e comandos internos permitem adaptar o fluxo de trabalho a preferências
+ individuais. A possibilidade de controlar o programa por comandos também favoreceu sua integração com scripts e ferramentas de desenvolvimento.
+
+ A popularidade do tmux cresceu junto com o uso de servidores remotos, ambientes de desenvolvimento no terminal e práticas de automação. Para muitos usuários, ele funciona como uma espécie de “espaço
+ de trabalho” textual: ao iniciar uma sessão, é possível recuperar rapidamente editores, logs, consoles e processos relacionados. Essa organização ajuda a reduzir a dependência de várias janelas
+ gráficas e torna mais fácil retomar tarefas após interrupções.
+
+ A história do tmux é, portanto, parte de uma evolução mais ampla do trabalho computacional: tornar ferramentas persistentes, portáteis e controláveis por texto. Ele não substituiu o terminal nem
+ inventou a multiplexação, mas refinou essas ideias para uma geração acostumada a combinar acesso remoto, automação e personalização. Sua longevidade demonstra que, mesmo em uma época de interfaces
+ gráficas sofisticadas, uma ferramenta pequena e bem integrada pode mudar profundamente a maneira como as pessoas trabalham.
+
+
+ Escreva um ensaio longo de 1500 palavras sobre a historia dos terminais, sem ferramentas.
+
+
+ Operation aborted
+
+
+ Use a ferramenta bash para rodar: sleep 8; echo pronto
+
+
+
+ $ sleep 8; echo pronto (timeout 15s)
+
+ pronto
+
+ Took 8.0s
+
+
+ pronto
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/model
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+→ model                           <provider/model> — Select model (opens selector UI)
+  scoped-models                   Enable/disable models for Ctrl+P cycling
+  subagents-models                [u:npm:pi-subagents] Show model mappings for discovered subagents
+  subagents-refresh-provider-mod  [u:npm:pi-subagents] Refresh the cached model catalog for one provider
+/work/proj
+↑9.5k ↓610 R4.0k CH83.9% $0.001 (sub) 1.7%/272k (auto)                                                                                                                         (openai) gpt-6-luna • low

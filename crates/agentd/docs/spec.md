@@ -1,5 +1,7 @@
 # agentd v1: observador conservador do estado dos agentes (contrato testavel) | RASCUNHO rev4 (rev3 + secao 14: `since` e `blocked_reason`, 2026-10-15 noite)
 
+> **Aviso (2026-10-16):** a fonte `herdr` (secoes 6 e 7) foi descartada pela decisao A22. Vale a [`spec-rev5.md`](spec-rev5.md) (fonte `tmux`, regras de estado como dados); a secao 0 da rev5 diz o que desta spec continua em vigor.
+
 Origem (decisoes do Jabbur, 2026-10-15): "creio que devemos pensar em um outro daemon que faca o que o herdr e luvus fazem para ler o estado dos agentes"; **daemon** (nao CLI), codigo em `crates/agentd` do `blocks`, implementacao pelo `codex-blocks`; filosofia unix (uma tarefa, uma ferramenta). Estudo-base: repositorio privado `agentd` (`docs/estudo-2026-10-15.md`). Os testes falam com o **binario** e com o **protocolo no socket**, nunca com a API interna.
 
 ## 0. O que a v1 e, e o que NAO e (leia primeiro)

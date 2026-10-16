@@ -1,0 +1,700 @@
+{
+  "schema": 1,
+  "agents": {
+    "claude": {
+      "tested_versions": [
+        "2.1.301"
+      ],
+      "identify": {
+        "commands": [
+          "claude"
+        ]
+      },
+      "rules": [
+        {
+          "id": "claude.blocked.permission",
+          "state": "blocked",
+          "reason": "permission",
+          "all": [
+            {
+              "in": "tail:12",
+              "re": "^\\s*Do you want to .+\\?\\s*$"
+            },
+            {
+              "in": "tail:12",
+              "re": "Esc to cancel"
+            }
+          ],
+          "fixtures": [
+            "claude/permission-bash",
+            "claude/permission-write"
+          ]
+        },
+        {
+          "id": "claude.blocked.plan",
+          "state": "blocked",
+          "reason": "permission",
+          "all": [
+            {
+              "in": "tail:12",
+              "re": "Would you like to proceed\\?"
+            },
+            {
+              "in": "tail:12",
+              "re": "^\\s*❯ 1\\. "
+            }
+          ],
+          "fixtures": [
+            "claude/plan"
+          ]
+        },
+        {
+          "id": "claude.blocked.trust",
+          "state": "blocked",
+          "reason": "permission",
+          "all": [
+            {
+              "in": "tail:12",
+              "re": "Quick safety check"
+            },
+            {
+              "in": "tail:12",
+              "re": "Enter to confirm"
+            }
+          ],
+          "fixtures": [
+            "claude/trust"
+          ]
+        },
+        {
+          "id": "claude.blocked.menu",
+          "state": "blocked",
+          "reason": "user_input",
+          "all": [
+            {
+              "in": "tail:3",
+              "re": "Esc to cancel"
+            }
+          ],
+          "fixtures": [
+            "claude/ask-user",
+            "claude/menu-model"
+          ]
+        },
+        {
+          "id": "claude.working.footer",
+          "state": "working",
+          "all": [
+            {
+              "in": "tail:8",
+              "re": "esc to interrupt"
+            }
+          ],
+          "fixtures": [
+            "claude/working-generation",
+            "claude/working-queued",
+            "claude/working-narrow"
+          ]
+        },
+        {
+          "id": "claude.idle.box",
+          "state": "idle",
+          "all": [
+            {
+              "in": "tail:8",
+              "re": "^❯"
+            },
+            {
+              "in": "tail:8",
+              "re": "^\\s*(⏸|⏵⏵) "
+            }
+          ],
+          "none": [
+            {
+              "in": "tail:8",
+              "re": "esc to interrupt"
+            },
+            {
+              "in": "tail:12",
+              "re": "Esc to cancel"
+            }
+          ],
+          "fixtures": [
+            "claude/idle-manual",
+            "claude/box-empty",
+            "claude/box-draft",
+            "claude/box-ghost",
+            "claude/slash-menu"
+          ]
+        }
+      ],
+      "marks": [
+        {
+          "id": "claude.mark.background",
+          "mark": "background",
+          "all": [
+            {
+              "in": "screen",
+              "re": "(Waiting for \\d+ background agent|^\\s*◯ )"
+            }
+          ],
+          "fixtures": [
+            "claude/background"
+          ]
+        }
+      ],
+      "input": {
+        "between": "^─{20,}$",
+        "strip_prefix": "^[❯›] ?"
+      }
+    },
+    "codex": {
+      "tested_versions": [
+        "0.162.1"
+      ],
+      "identify": {
+        "commands": [
+          "codex"
+        ]
+      },
+      "rules": [
+        {
+          "id": "codex.blocked.title",
+          "state": "blocked",
+          "reason": "permission",
+          "all": [
+            {
+              "in": "title",
+              "re": "Action Required"
+            }
+          ],
+          "fixtures": [
+            "codex/approval-dot",
+            "codex/approval-bang"
+          ]
+        },
+        {
+          "id": "codex.blocked.approval",
+          "state": "blocked",
+          "reason": "permission",
+          "all": [
+            {
+              "in": "tail:12",
+              "re": "Would you like to .+\\?"
+            },
+            {
+              "in": "tail:12",
+              "re": "Press enter to confirm or esc to cancel"
+            }
+          ],
+          "fixtures": [
+            "codex/approval-dot"
+          ]
+        },
+        {
+          "id": "codex.blocked.menu",
+          "state": "blocked",
+          "reason": "user_input",
+          "all": [
+            {
+              "in": "tail:3",
+              "re": "(enter select · esc back|Browsing transcript|enter continue · esc skip)"
+            }
+          ],
+          "fixtures": [
+            "codex/menu-model",
+            "codex/transcript",
+            "codex/update-banner"
+          ]
+        },
+        {
+          "id": "codex.working.title",
+          "state": "working",
+          "all": [
+            {
+              "in": "title",
+              "re": "^[\\x{2800}-\\u28FF]"
+            }
+          ],
+          "fixtures": [
+            "codex/working-flow",
+            "codex/working-ansi",
+            "codex/working-indicator",
+            "codex/narrow-working"
+          ]
+        },
+        {
+          "id": "codex.working.screen",
+          "state": "working",
+          "all": [
+            {
+              "in": "tail:8",
+              "re": "esc to interrupt"
+            }
+          ],
+          "fixtures": [
+            "codex/working-indicator"
+          ]
+        },
+        {
+          "id": "codex.idle.box",
+          "state": "idle",
+          "all": [
+            {
+              "in": "tail:6",
+              "re": "^›"
+            },
+            {
+              "in": "tail:3",
+              "re": "^\\s+\\S.* · [/~]"
+            }
+          ],
+          "fixtures": [
+            "codex/idle",
+            "codex/box-placeholder",
+            "codex/box-draft",
+            "codex/interrupted"
+          ]
+        }
+      ],
+      "input": {
+        "line": "^›",
+        "strip_prefix": "^› ?"
+      }
+    },
+    "pi": {
+      "tested_versions": [
+        "1.3.0"
+      ],
+      "identify": {
+        "commands": [
+          "pi"
+        ]
+      },
+      "rules": [
+        {
+          "id": "pi.blocked.menu",
+          "state": "blocked",
+          "reason": "user_input",
+          "all": [
+            {
+              "in": "tail:6",
+              "re": "Escape/Ctrl\\+C to cancel"
+            }
+          ],
+          "fixtures": [
+            "pi/menu-model"
+          ]
+        },
+        {
+          "id": "pi.working.ruler",
+          "state": "working",
+          "all": [
+            {
+              "in": "tail:6",
+              "re": "^── [\\u280B\\x{2819}\\x{2839}\\x{2838}\\u283C\\x{2834}\\x{2826}\\x{2827}\\x{2807}\\u280F] Working ─+$"
+            }
+          ],
+          "fixtures": [
+            "pi/working",
+            "pi/narrow-working",
+            "pi/steering-queue",
+            "pi/working-ansi"
+          ]
+        },
+        {
+          "id": "pi.idle.box",
+          "state": "idle",
+          "all": [
+            {
+              "in": "tail:6",
+              "re": "^─{20,}$",
+              "min": 2
+            },
+            {
+              "in": "tail:2",
+              "re": "\\$\\d+\\.\\d{3}"
+            }
+          ],
+          "fixtures": [
+            "pi/idle",
+            "pi/box-empty",
+            "pi/box-draft"
+          ]
+        }
+      ],
+      "input": {
+        "between": "^─{20,}$"
+      }
+    }
+  },
+  "golden": [
+    {
+      "fixture": "claude/ask-user",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "claude.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/background",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": [
+          "background"
+        ]
+      }
+    },
+    {
+      "fixture": "claude/box-draft",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": [],
+        "input": "draft"
+      }
+    },
+    {
+      "fixture": "claude/box-empty",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": [],
+        "input": "empty"
+      }
+    },
+    {
+      "fixture": "claude/box-ghost",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": [],
+        "input": "empty"
+      }
+    },
+    {
+      "fixture": "claude/idle-manual",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/menu-model",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "claude.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/permission-bash",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "claude.blocked.permission",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/permission-write",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "claude.blocked.permission",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/plan",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "claude.blocked.plan",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/slash-menu",
+      "kind": "claude",
+      "expect": {
+        "state": "idle",
+        "rule": "claude.idle.box",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/trust",
+      "kind": "claude",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "claude.blocked.trust",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/working-generation",
+      "kind": "claude",
+      "expect": {
+        "state": "working",
+        "rule": "claude.working.footer",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/working-narrow",
+      "kind": "claude",
+      "expect": {
+        "state": "working",
+        "rule": "claude.working.footer",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "claude/working-queued",
+      "kind": "claude",
+      "expect": {
+        "state": "working",
+        "rule": "claude.working.footer",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/approval-bang",
+      "kind": "codex",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "codex.blocked.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/approval-dot",
+      "kind": "codex",
+      "expect": {
+        "state": "blocked",
+        "reason": "permission",
+        "rule": "codex.blocked.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/box-draft",
+      "kind": "codex",
+      "expect": {
+        "state": "idle",
+        "rule": "codex.idle.box",
+        "marks": [],
+        "input": "draft"
+      }
+    },
+    {
+      "fixture": "codex/box-draft-multiline",
+      "kind": "codex",
+      "expect": {
+        "state": "idle",
+        "rule": "codex.idle.box",
+        "marks": [],
+        "input": "draft"
+      }
+    },
+    {
+      "fixture": "codex/box-placeholder",
+      "kind": "codex",
+      "expect": {
+        "state": "idle",
+        "rule": "codex.idle.box",
+        "marks": [],
+        "input": "empty"
+      }
+    },
+    {
+      "fixture": "codex/idle",
+      "kind": "codex",
+      "expect": {
+        "state": "idle",
+        "rule": "codex.idle.box",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/interrupted",
+      "kind": "codex",
+      "expect": {
+        "state": "idle",
+        "rule": "codex.idle.box",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/menu-model",
+      "kind": "codex",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "codex.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/narrow-working",
+      "kind": "codex",
+      "expect": {
+        "state": "working",
+        "rule": "codex.working.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/transcript",
+      "kind": "codex",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "codex.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/update-banner",
+      "kind": "codex",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "codex.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/working-ansi",
+      "kind": "codex",
+      "expect": {
+        "state": "working",
+        "rule": "codex.working.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/working-flow",
+      "kind": "codex",
+      "expect": {
+        "state": "working",
+        "rule": "codex.working.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "codex/working-indicator",
+      "kind": "codex",
+      "expect": {
+        "state": "working",
+        "rule": "codex.working.title",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "pi/box-draft",
+      "kind": "pi",
+      "expect": {
+        "state": "idle",
+        "rule": "pi.idle.box",
+        "marks": [],
+        "input": "draft"
+      }
+    },
+    {
+      "fixture": "pi/box-empty",
+      "kind": "pi",
+      "expect": {
+        "state": "idle",
+        "rule": "pi.idle.box",
+        "marks": [],
+        "input": "empty"
+      }
+    },
+    {
+      "fixture": "pi/idle",
+      "kind": "pi",
+      "expect": {
+        "state": "idle",
+        "rule": "pi.idle.box",
+        "marks": [],
+        "input": "empty"
+      }
+    },
+    {
+      "fixture": "pi/menu-model",
+      "kind": "pi",
+      "expect": {
+        "state": "blocked",
+        "reason": "user_input",
+        "rule": "pi.blocked.menu",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "pi/narrow-working",
+      "kind": "pi",
+      "expect": {
+        "state": "working",
+        "rule": "pi.working.ruler",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "pi/slash-menu",
+      "kind": "pi",
+      "expect": {
+        "state": "unknown",
+        "rule": null,
+        "marks": [
+          "unmatched"
+        ]
+      }
+    },
+    {
+      "fixture": "pi/steering-queue",
+      "kind": "pi",
+      "expect": {
+        "state": "working",
+        "rule": "pi.working.ruler",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "pi/working",
+      "kind": "pi",
+      "expect": {
+        "state": "working",
+        "rule": "pi.working.ruler",
+        "marks": []
+      }
+    },
+    {
+      "fixture": "pi/working-ansi",
+      "kind": "pi",
+      "expect": {
+        "state": "working",
+        "rule": "pi.working.ruler",
+        "marks": []
+      }
+    }
+  ]
+}

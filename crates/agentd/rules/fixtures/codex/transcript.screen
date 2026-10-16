@@ -1,0 +1,50 @@
+› Escreva um ensaio de cerca de 400 palavras sobre a historia do tmux. Nao use ferramentas.
+
+  Uma de suas características centrais é a separação entre o servidor e os clientes. O servidor mantém as sessões em execução, enquanto uma ou mais janelas de terminal podem se conectar a elas. Assim,
+  se a conexão SSH cair ou o usuário fechar o terminal, os processos continuam ativos. Mais tarde, é possível reconectar-se e retomar o trabalho. Essa arquitetura também permite compartilhar uma
+  sessão entre pessoas ou alternar entre diferentes espaços de trabalho sem encerrar os programas abertos.
+
+  O tmux ganhou visibilidade na comunidade OpenBSD e, depois, em outros sistemas Unix e Linux. Sua primeira versão estável, a 1.0, foi lançada em 2009. O projeto foi distribuído sob uma licença
+  permissiva, o que facilitou sua inclusão em sistemas e sua adaptação por diferentes comunidades. Ao longo dos anos, versões sucessivas ampliaram os recursos e melhoraram a compatibilidade, enquanto
+  a ferramenta permaneceu relativamente pequena e focada.
+
+
+› Escreva um ensaio longo de 1500 palavras sobre a historia dos terminais, sem ferramentas.
+
+
+• O tmux surgiu em meados dos anos 2000, criado pelo desenvolvedor britânico Nicholas Marriott. Seu nome vem de “terminal multiplexer”: um programa que permite dividir uma única sessão de terminal em
+  várias janelas e painéis. A ideia não era nova. Ferramentas como o GNU Screen já ofereciam recursos semelhantes, especialmente úteis em sistemas Unix e em conexões remotas. O tmux retomou essa
+  tradição e procurou torná-la mais flexível e adequada aos hábitos de quem trabalhava em várias tarefas ao mesmo tempo.
+
+  Uma de suas características centrais é a separação entre o servidor e os clientes. O servidor mantém as sessões em execução, enquanto uma ou mais janelas de terminal podem se conectar a elas. Assim,
+  se a conexão SSH cair ou o usuário fechar o terminal, os processos continuam ativos. Mais tarde, é possível reconectar-se e retomar o trabalho. Essa arquitetura também permite compartilhar uma
+  sessão entre pessoas ou alternar entre diferentes espaços de trabalho sem encerrar os programas abertos.
+
+  O tmux ganhou visibilidade na comunidade OpenBSD e, depois, em outros sistemas Unix e Linux. Sua primeira versão estável, a 1.0, foi lançada em 2009. O projeto foi distribuído sob uma licença
+  permissiva, o que facilitou sua inclusão em sistemas e sua adaptação por diferentes comunidades. Ao longo dos anos, versões sucessivas ampliaram os recursos e melhoraram a compatibilidade, enquanto
+  a ferramenta permaneceu relativamente pequena e focada.
+
+  Parte de sua popularidade veio de uma combinação simples: sessões persistentes, divisão de tela, atalhos configuráveis e uma interface que funciona sem ambiente gráfico. Essas funções tornaram o
+  programa útil para administradores de sistemas, desenvolvedores e qualquer pessoa que trabalhe remotamente ou mantenha vários processos de linha de comando abertos. A possibilidade de salvar
+  configurações em um arquivo de texto também atraiu usuários
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+
+› Crie o arquivo teste.txt com o texto ola usando o shell.
+
+
+• O ambiente atual está configurado como somente leitura. Vou solicitar a autorização necessária para criar teste.txt com o conteúdo ola.
+
+✗ You canceled the request to run printf 'ola' > teste.txt
+
+• Failed (exit 1) printf 'ola' > teste.txt
+  └ (no output)
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna high · /work/proj · Escreva ensaio sobre tmux
+  Browsing transcript · ↑↓/jk scroll · ←→/hl prompts · ^t details · ↵ rewind · esc back

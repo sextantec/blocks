@@ -1,0 +1,50 @@
+
+ ▀▀█  v1.3.0
+ █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Skills]
+  council-mode, pi-subagents, ripwire-before-you-build, ripwire-change-check, ripwire-find-bug, ripwire-fresh-eyes, ripwire-graph-query, ripwire-handoff, ripwire-layers, ripwire-mcp, ripwire-navigate,
+ripwire-orient, ripwire-perf-target, ripwire-quality-bar, ripwire-reuse-first, ripwire-router, ripwire-security-scan, ripwire-write-tests
+
+[Prompts]
+  /council, /gather-context-and-clarify, /parallel-cleanup, /parallel-research, /parallel-review, /review-loop
+
+[Extensions]
+  herdr-agent-state.ts, pi-subagents, pi-web-access:dist
+
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+
+ Escreva um ensaio de 150 palavras sobre pipes do Unix, sem ferramentas.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+── ⠙ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/work/proj
+$0.000 (sub) 1.7%/272k (auto)                                                                                                                                                  (openai) gpt-6-luna • low

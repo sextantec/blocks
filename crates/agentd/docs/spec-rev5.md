@@ -1,0 +1,222 @@
+# agentd v1 rev5: fonte `tmux` e regras de estado como dados | RASCUNHO rev5 (2026-10-16)
+
+Origem: decisao A22 do Jabbur (2026-10-16, "foco unico em tmux", a fonte `herdr` e descartada), plano de leitura e laboratorio aprovados ("Aprovado", "B", "Estou de acordo com o A" para o Pi) e ordem de escrever esta spec ("Siga com o spec", 2026-10-16, conversa do Claude Code). Base de prova: medidas em tmux 3.7c isolado com Claude Code 2.1.301, Codex 0.162.1 e Pi 1.3.0 (relatorio `docs/medidas-tmux-2026-10-16.md`, telas reais em `rules/fixtures/`). Esta spec **completa e em parte substitui** a `spec.md` (rev4); os testes falam com o **binario** e com o **protocolo no socket**, nunca com a API interna.
+
+## 0. Relacao com a rev4 (leia primeiro)
+| Parte da rev4 | Na rev5 |
+|---|---|
+| Secoes 0, 1, 2 (filosofia, observador, nao faz) | **Mantidas.** A secao 0 vale com mais forca: estado observado nao e autorizacao de digitar. |
+| Secao 3 (modelo), regras 0, 1, 2, 4, 6 da secao 4 | **Mantidas**, com os acrescimos da secao 3 desta spec (campos `rule`, `input`; marcas `background` e `unmatched`; `kind` ganha `pi`). |
+| Regra 3 (painel reaproveitado) e regra 5 (confirmacao de `idle`) | **Reescritas** para tmux (secao 5 desta spec). |
+| Secao 5 (protocolo), 8 (CLI), 9 (seguranca), 13, 14 (`since`, `blocked_reason`) | **Mantidas**; acrescimos nas secoes 3, 8 e 9 desta spec. |
+| **Secao 6 (fonte `herdr`) e a secao 7 (configuracao)** | **Substituidas** pelas secoes 4 e 7 desta spec. O `herdr` nao e mais lido, chamado nem aceito na configuracao. |
+| Secao 10 (testes G1 a G22) | Os testes que dependem do `herdr` falso (G1, G2, G7, G8, G11, G15, G16, G17, G19, G21, G23 da secao 10) **sao reescritos** como R1 a R16 (secao 11); os de protocolo, CLI, reinicio, atomicidade e assinante lento (G5, G6, G9, G10, G12, G14, G20, G22) continuam, trocando apenas a fonte falsa. `since`/`blocked_reason` (G23 a G29 da secao 14) continuam, com a emenda da secao 6 desta spec. |
+
+## 1. Problema, exemplo, solucao
+**Problema.** O estado de um agente so existe na tela dele. O herdr e o Luvus a raspam e, quando nenhuma regra casa, devolvem `idle` (`manifest.rs:550-553`, `detect.rs:1301-1305`). As medidas mostraram quatro formas de isso dar errado, todas reais:
+1. **Falso `idle` no Codex:** em cada resposta, por cerca de 1,8 s o indicador `Working ... esc to interrupt` some da tela e a tela fica igual a de ocioso; so o **titulo do painel** (spinner braille) denuncia o trabalho.
+2. **Dialogo sem a frase esperada:** o dialogo de aprovacao de plano do Claude **nao tem** `Esc to cancel`; uma regra so por essa frase o perde.
+3. **Caixa "vazia" que nao esta:** o Claude mostra uma **sugestao fantasma** (`❯ ls | wc -l`) e o Codex um placeholder (`Ask Codex to do anything`) na caixa de entrada sem ninguem ter digitado; ambos em atributo *dim*. Rascunho humano e atributo normal.
+4. **Frases que envelhecem:** as frases do visualizador de transcricao do Codex 0.162.1 ja nao casam com as do herdr 0.9.5.
+
+**Solucao.** O `agentd` passa a ler o tmux (so `list-panes` e `capture-pane`), aplica **regras de estado que sao dados** (um arquivo JSON, cada regra com tela real de prova, verificavel offline por `agentd rules check`), publica `idle` **somente com prova positiva**, trata agente conhecido sem regra casando como `unknown` (nunca `idle`) e classifica a caixa de entrada (`empty | draft | unknown`) sem copiar texto algum.
+
+**Exemplo (Codex, um turno).** t=0 s caixa vazia, titulo `work-codex`: `idle`. t=0,5 s o titulo ganha `⠼ ` e a tela `Working (0s • esc to interrupt)`: `working` imediato. t=13,7 s o texto flui, a tela perde `esc to interrupt` e parece ociosa, mas o titulo ainda tem o spinner: continua `working`. t=15,5 s o spinner some e a tela e ociosa: primeira leitura `idle` (publicado: ainda `working`, marca `idle_unconfirmed`); 2,5 s depois, sem saida nova no painel, `idle` confirmado. Se, no meio, aparece o titulo `[ . ] Action Required | ...`, o estado vira `blocked` com `blocked_reason: permission`, na hora.
+
+## 2. Principios (invariantes desta spec)
+1. **Na duvida, `unknown`; `idle` so por prova positiva** de uma regra `idle` que casa **e** nenhuma regra `blocked` ou `working` casa na mesma leitura.
+2. **Precedencia fixa por seguranca: `blocked` > `working` > `idle`** (nao por numero de prioridade). Empate dentro do mesmo estado resolve pela **ordem no arquivo**.
+3. **Nenhum texto da tela, do titulo ou do stderr sai do daemon**: so classes enumeradas, identificadores de regra (escritos pelo operador, nunca extraidos da tela) e codigos fixos.
+4. **Somente leitura:** o daemon nunca digita, nunca muda o tmux, nunca cria painel. A entrega de mensagem (enviar teclas) e outro programa e fica fora da v1 (secao 12).
+5. **A tela e a unica fonte de estado.** Hooks dos agentes nao entram: nao cobrem `Esc` (UserPromptSubmit sem Stop), o aviso de bloqueio chega 6 s depois e permissao e pergunta sao indistinguiveis. A classe do bloqueio (`permission`/`user_input`) sai da propria tela (secao 6).
+
+## 3. Modelo (acrescimos a secao 3 da rev4)
+- **`kind`:** `claude | codex | pi`. Cada `kind` precisa existir no arquivo de regras.
+- **`Agente` ganha dois campos** (aditivos, nulos quando nao se aplicam):
+  - `rule`: **identificador** da regra que decidiu o estado desta leitura (string do arquivo de regras) ou `null` (sem regra casando, agente ausente, leitura falha). Serve para diagnostico; **nao gera evento**.
+  - `input`: classe da caixa de entrada na ultima leitura valida: `"empty" | "draft" | "unknown"`, **somente quando o estado publicado e `idle`**; em qualquer outro estado e `null`. **Nao gera evento** (digitar nao pode inundar o anel). Ver secao 6.
+- **Marcas** (conjunto): alem de `error`, `stale`, `idle_unconfirmed`:
+  - `unmatched`: leitura valida, agente identificado, **nenhuma regra casou** (estado `unknown` **sem** `error`);
+  - `background`: uma regra de marca casou (no Claude: subagente em segundo plano com o agente principal livre). Nao muda o estado: o principal continua `idle`.
+- **Evidencia/fonte:** `evidence: observed`, `source: "tmux"` em toda leitura valida.
+- **`blocked_reason`** (secao 14 da rev4) deixa de ser sempre `unknown`: vem da regra `blocked` que casou (`permission | user_input | unknown`). Mudar so a classe com o estado `blocked` mantido **gera evento**.
+- **Leitura valida (substitui a da rev4):** o `list-panes` saiu 0, dentro do limite e com todas as linhas no formato da secao 4; o painel do agente aparece **uma unica vez**; esta vivo, o processo em primeiro plano e do `kind` (secao 4) e o `capture-pane` saiu 0 dentro do limite. Qualquer outra e **leitura falha** ou **painel ausente**, conforme a secao 4.
+
+## 4. Fonte `tmux` (a unica da v1; substitui a secao 6 da rev4)
+- **Uma fonte por agente**, exatamente (`sources` com um elemento), `{"type":"tmux","pane":"%N"}` **ou** `{"type":"tmux","tag":"NOME"}`:
+  - `pane`: o `pane_id` do tmux (`%` e digitos). Estavel enquanto o servidor tmux vive; muda depois de reinicio do tmux.
+  - `tag`: casa com a opcao de painel `@agentd` (`tmux set-option -p -t PAINEL @agentd NOME`). Preferivel: sobrevive a reinicios. `NOME` em `[a-z0-9_-]{1,32}`. Zero painel com a tag = **painel ausente**; mais de um = leitura falha **so desse agente** (`pane_ambiguous`).
+- **Processos (lista fechada, sem shell, `Command` com `argv`):** o daemon chama so
+  1. `TMUX -S SOCKET list-panes -a -F FORMATO` (uma vez por ciclo);
+  2. `TMUX -S SOCKET capture-pane -p -e -J -t %N` (uma vez por agente cujo painel esta presente, vivo e identificado, em serie, depois do `list-panes`).
+
+  `-S SOCKET` so aparece se `tmux_socket` esta configurado; `TMUX` e `tmux_bin`. Qualquer outro subcomando (`send-keys`, `new-*`, `kill-*`, `set-*`, `display*`, `resize-*`, `attach`, `respawn-*`, `pipe-pane`, `source-file`, `run-shell`...) e **proibido e coberto por teste** com tmux falso que registra as chamadas. O daemon **nunca** captura um painel que nao esta configurado nem um painel cujo processo em primeiro plano nao e do `kind`.
+- **Formato do `list-panes`** (campos separados por TAB; `pane_title` por ultimo, pois o texto pode ser qualquer coisa):
+  `#{pane_id}<TAB>#{pane_pid}<TAB>#{pane_dead}<TAB>#{pane_dead_status}<TAB>#{window_activity}<TAB>#{pane_current_command}<TAB>#{@agentd}<TAB>#{pane_title}`.
+  Linha com menos de 8 campos, `pane_id` fora de `%[0-9]+`, `pane_pid`/`window_activity` nao numericos ou `pane_dead` fora de `0|1` => **leitura toda falha** (`source_bad_output`). `pane_id` repetido => `duplicate_pane`. Campos extras no fim sao absorvidos pelo titulo. O titulo e usado **somente** pelas regras (secao 6) e descartado; nunca guardado.
+- **Estado do painel por agente, nesta ordem:**
+  1. nao esta na lista, ou `pane_dead` e `1`, ou `pane_current_command` **nao esta** em `identify.commands` do `kind` => **painel ausente** (rev4, regra 1b: `unknown` com `error` ate `gone_after_s`, entao `gone`). Motivo: o agente saiu e sobrou o shell (`zsh`); a tela de um shell **nunca** e lida.
+  2. caso contrario, captura-se a tela.
+- **Captura e analise:** a saida do `capture-pane -p -e -J` e dividida em linhas. Em cada linha, as sequencias SGR (`ESC [ P;P;... m`) sao interpretadas **parametro a parametro**: `0` zera tudo, `2` liga *dim*, `22` desliga *dim*, `7` liga *video reverso*, `27` desliga; `38`, `48` e `58` consomem os parametros da cor (`5;N` ou `2;R;G;B`) e sao ignorados; todo outro parametro (inclusive `1`, `39`, `49`) e ignorado. O estado SGR **recomeca zerado em cada linha** (nao ha SGR persistente entre linhas). Qualquer outra sequencia de escape e descartada. O texto plano resultante tem **U+00A0 trocado por espaco** (o Claude escreve `❯` seguido de U+00A0) e os espacos finais de cada linha removidos. Saida de `capture-pane` acima de **256 KiB** => falha **so desse agente** (`source_too_large`). Se a saida nao tiver SGR (fixture em texto plano), nenhum caractere e dim nem reverso.
+- **Processo:** no maximo **um** em voo; `source_timeout_ms` (padrao 3000) por processo: ao estourar, `SIGKILL` no grupo e espera da coleta antes do proximo; stdout do `list-panes` limitado a 1 MiB; stderr lido e **descartado** (ate 64 KiB), nunca guardado.
+- **`observed_at`:** instante em que o processo `list-panes` do ciclo foi iniciado (conservador, como na rev4).
+- **Codigos de falha (so estes aparecem em `status`/logs):** `source_spawn_failed`, `source_timeout`, `source_exit_nonzero` (inclui "no server running": servidor tmux fora e **leitura falha**, nunca `gone`), `source_too_large`, `source_bad_output`, `duplicate_pane`, `pane_ambiguous`, `capture_failed`. `status.sources.tmux = {ok, last_ok_at, last_error}` (`ok` = a **execucao** do `list-panes` deu certo).
+- **Identificacao medida (comando em primeiro plano):** Claude `claude`, Codex `codex`, Pi `pi` (o Pi mostrou `node` por ~1 s na partida: nesse intervalo o painel conta como ausente e volta). Se um agente for lancado por um caminho que mude o nome (por exemplo o Claude como `2.1.301` quando chamado pelo binario versionado [estimativa, nao medida]), a lista `identify.commands` do arquivo de regras e o lugar de acrescentar o nome.
+
+## 5. Regras de estado (emendas as regras 3 e 5 da rev4; as demais valem como estao)
+3'. **Painel reaproveitado:** o par (`pane_id`, `pane_pid`) da ultima leitura valida e lembrado. Se mudar, a janela de confirmacao e zerada, sai um evento e o estado fica `unknown` com `error` ate uma leitura valida do novo par (e `idle` volta pela regra 5'). Se `pane_pid` e o mesmo mas o agente reiniciou dentro do mesmo shell, o painel passou por "ausente" (shell em primeiro plano) ou a tela mudou (a regra 5' zera a janela por `window_activity`).
+5'. **Confirmacao de `idle` observado (anti-oscilacao):** **toda** transicao para `idle` publicado, de qualquer estado anterior (inclusive `unknown`, `error`, `stale`, `gone`, partida), exige **tres condicoes juntas** em leituras validas: (i) `idle_confirm_polls` leituras consecutivas `idle` (padrao 2); (ii) o **mesmo par** (`pane_id`, `pane_pid`), o **mesmo `window_activity`** e o **mesmo `rule`** (identificador da regra `idle` que casou) em todas elas; (iii) pelo menos `idle_confirm_ms` entre a primeira e a ultima (padrao 2500). **Qualquer outra leitura** (falha, ausente, nao-`idle`, `unknown`, par, `window_activity` ou `rule` diferente) **zera** a janela. Enquanto nao confirmado, o estado publicado e o anterior (ou `unknown` se o anterior era `unknown`/`gone`) com a marca `idle_unconfirmed`. Entrar em `working` ou `blocked` e imediato. `window_activity` (segundos Unix da ultima saida da janela) faz o papel do `state_change_seq` do herdr: **qualquer saida no painel durante a janela impede a confirmacao**; num tmux com varios paineis na mesma janela a saida de outro painel tambem impede (so atrasa, nunca antecipa). Limite honesto: confirma **estabilidade amostrada com resolucao de 1 s**, nao quietude comprovada; por isso `idle_confirm_ms` recomendado e >= 2000.
+
+## 6. Regras de estado como dados (arquivo de regras)
+Arquivo JSON (`rules_file` da configuracao; exemplo normativo inicial: `crates/agentd/rules/default.json`, Anexo A). Campo desconhecido, **chave duplicada**, regex invalida, `kind` da configuracao sem entrada, regra sem fixture ou arquivo gravavel por grupo/outros (`mode & 0o022`) => o daemon **nao sobe** (saida 1) e `agentd rules check` falha.
+
+```json
+{
+  "schema": 1,
+  "agents": {
+    "claude": {
+      "tested_versions": ["2.1.301"],
+      "identify": {"commands": ["claude"]},
+      "rules": [
+        {"id": "claude.blocked.permission", "state": "blocked", "reason": "permission",
+         "all": [{"in": "tail:12", "re": "^\\s*Do you want to .+\\?\\s*$"}, {"in": "tail:12", "re": "Esc to cancel"}],
+         "fixtures": ["claude/permission-bash", "claude/permission-write"]}
+      ],
+      "marks": [{"id": "claude.mark.background", "mark": "background", "all": [...], "fixtures": [...]}],
+      "input": {"between": "^─{20,}$", "strip_prefix": "^(?:❯|›) ?"}
+    }
+  },
+  "golden": [
+    {"fixture": "claude/permission-bash", "kind": "claude",
+     "expect": {"state": "blocked", "reason": "permission", "rule": "claude.blocked.permission", "input": null, "marks": []}}
+  ]
+}
+```
+- **Regra de estado:** `id` unico `[a-z0-9._-]{1,64}`; `state` em `blocked|working|idle`; `reason` obrigatoria em `blocked` (`permission|user_input|unknown`) e proibida nos outros; `all` (lista nao vazia de condicoes que **todas** precisam valer); `none` (opcional: condicoes que **nenhuma** pode valer); `fixtures` (lista nao vazia de nomes de tela que a regra deve **casar**). A regra casa quando todas as de `all` valem e nenhuma de `none` vale.
+- **Condicao:** `{"in": REGIAO, "re": REGEX, "min": N}`; `REGIAO` = `screen` (todas as linhas), `tail:N` (as ultimas N linhas **nao vazias**, `N` de 1 a 64) ou `title` (o titulo do painel); `re` e uma expressao regular **sem retrocesso** (crate `regex`, Unicode) testada **linha a linha** (nunca atravessa linhas); `min` (padrao 1) = quantas linhas da regiao precisam casar.
+- **Avaliacao por leitura:** (1) avaliam-se todas as regras de estado do `kind`; (2) se alguma `blocked` casa, o estado e `blocked` e a `reason` e `rule` vem da **primeira** `blocked` que casou na ordem do arquivo; senao, se alguma `working` casa, `working`; senao, se alguma `idle` casa, `idle`; senao **nenhuma casou**: `unknown` com a marca `unmatched`, `rule: null`. (3) avaliam-se as **regras de marca** (`marks`, mesma sintaxe de condicao, `mark` em `background`) e as que casam entram nas marcas da leitura.
+- **Classificacao da caixa de entrada (`input`)** — calculada so quando o estado da leitura e `idle`:
+  - `between`: regex de linha-regua. Pega-se as **duas ultimas** linhas da tela que casam; a caixa sao as linhas **estritamente entre** elas. Se houver menos de duas reguas, `input = "unknown"`.
+  - `line` (alternativa ao `between`, para o Codex): `{"line": {"in": "tail:6", "re": "^›"}}`: a caixa e a **ultima** linha da regiao que casa. Sem linha, `"unknown"`.
+  - `strip_prefix` (opcional; o Pi nao tem prefixo): regex aplicada ao inicio de cada linha da caixa; o trecho casado (prefixo `❯ ` ou `› `) sai da analise.
+  - **`draft`** se, depois do prefixo, existe **ao menos um caractere nao branco que nao e dim e nao e video reverso**; **`empty`** se a caixa tem so brancos, texto dim (sugestao fantasma do Claude, placeholder do Codex) e/ou o cursor em video reverso (Pi); `unknown` se o localizador falha. Linhas de continuacao de rascunho com varias linhas contam no `between`; no `line` so a primeira linha conta (limite declarado). Texto plano sem SGR (fixture sem atributos) nunca e dim: um placeholder em fixture `.txt` simples sai `draft`; por isso as fixtures de `input` sao gravadas com `-e` (`.ansi`).
+  - Resultado e **so a classe**: nenhum caractere da caixa e guardado ou publicado.
+- **Consequencia de seguranca (repetida de proposito):** `input: "empty"` e uma observacao de **ate um ciclo atras**. Quem for digitar (outro programa) tem que reler a tela imediatamente antes e depois do envio; o `agentd` nao fecha essa corrida (secao 0 da rev4).
+- **`golden.expect`:** `state` e `rule` sempre; `reason` em `blocked`; `marks` (lista; `["unmatched"]` quando `unknown`); `input` **so quando a fixture e `.screen` gravada com `-e`** (fixture em texto plano nunca tem atributo dim: um placeholder em texto plano sairia `draft`, entao a `golden` dela omite `input`). Chave ausente = nao verificada.
+- **Teste offline das regras:** `agentd rules check --rules ARQ --fixtures DIR [--json]` (secao 8) executa todas as entradas `golden` e, para cada regra, as suas `fixtures`, e verifica tambem que **toda regra tem ao menos uma fixture que a faz casar e ao menos uma `golden` de outro estado que ela nao altera**. E o procedimento quando um agente atualiza: gravar a tela nova (Anexo B), acrescentar a fixture e rodar o check.
+
+### Emenda a secao 14 da rev4 (G26)
+`blocked_reason` agora vem da regra: em `blocked` e `"permission" | "user_input" | "unknown"` conforme a regra; em qualquer outro estado e `null`. Os testes que esperavam sempre `"unknown"` passam a esperar a classe da regra (`R1`).
+
+## 7. Configuracao (substitui a secao 7 da rev4)
+```json
+{
+  "tmux_bin": "tmux",
+  "tmux_socket": null,
+  "rules_file": "/home/USUARIO/.config/agentd/rules.json",
+  "poll_ms": 2000,
+  "source_timeout_ms": 3000,
+  "stale_after_ms": 30000,
+  "gone_after_s": 120,
+  "idle_confirm_polls": 2,
+  "idle_confirm_ms": 2500,
+  "ring": 4096,
+  "agents": {
+    "claude":       {"kind": "claude", "sources": [{"type": "tmux", "tag": "claude"}]},
+    "codex-blocks": {"kind": "codex",  "sources": [{"type": "tmux", "tag": "codex-blocks"}]},
+    "pi":           {"kind": "pi",     "sources": [{"type": "tmux", "pane": "%7"}]}
+  }
+}
+```
+Campo desconhecido e **chave duplicada** recusados. Limites da rev4 (`poll_ms` 200 a 10000, `source_timeout_ms` 200 a 30000, `stale_after_ms` > `poll_ms` + `source_timeout_ms`, `gone_after_s` 5 a 86400, `idle_confirm_polls` 1 a 5, `idle_confirm_ms` 0 a 30000, `ring` 64 a 65536, ate 32 agentes) valem; recusa tambem `id` repetido, `pane` ou `tag` repetidos entre agentes, `kind` fora de `claude|codex|pi` ou sem regras, `type` diferente de `tmux` (**`herdr` e recusado**), `sources` com tamanho diferente de 1, `pane` fora de `%[0-9]+`, `tag` fora de `[a-z0-9_-]{1,32}`, `tmux_bin` ou `rules_file` vazios, `rules_file` ausente. `tmux_socket` e `null` (padrao do tmux) ou caminho absoluto.
+
+## 8. CLI (acrescimos a secao 8 da rev4)
+- `agentd rules check --rules ARQ --fixtures DIR [--json]`: offline, nao fala com o daemon nem com o tmux. Sai 0 se todas as `golden` e `fixtures` passam, 1 se alguma falha (a saida diz **qual fixture, qual regra e esperado vs obtido**, sem imprimir o conteudo da tela), 2 uso incorreto.
+- `agentd get/list --json` trazem `rule` e `input`; sem `--json` a linha por agente nao muda (`ID ESTADO[,MARCAS] EVIDENCIA FONTE idade=Ns`).
+- `agentd health`: sai 0 so se o daemon responde e `sources.tmux.ok` e verdadeiro.
+
+## 9. Seguranca e privacidade (acrescimos)
+- Alem da secao 9 da rev4: o daemon **nao escreve** no tmux (lista fechada, secao 4); **nunca captura** painel nao configurado ou sem agente; `rules_file` e dado do operador, validado e nao gravavel por grupo/outros; **o texto da tela e do titulo e usado so em memoria para casar regras e descartado**.
+- **Nada da tela vira saida:** `rule` e identificador do arquivo, `input` e uma classe, `blocked_reason` e uma classe. Sentinelas na tela, no titulo, no stderr do tmux e no cwd nunca aparecem em `agent.*`, `status`, eventos, CLI nem log (`R5`).
+- **Entrada hostil.** Conteudo que o proprio agente escreve na tela (por exemplo, um modelo induzido a imprimir "Esc to cancel") pode forcar `blocked` ou `working` (lado seguro). Para forcar `idle` seria preciso sumir com o sinal genuino de trabalho (o rodape `esc to interrupt`, o spinner do titulo ou a regua `Working`), que o agente nao controla pelo texto que imprime; **isto nao esta provado**, e o `idle` continua sendo "permitido com aviso" (secao 0 da rev4). Um processo do mesmo uid que escreva no painel ou altere `@agentd` e `pane_title` pode influenciar o estado: mesmo uid nao e isolamento.
+
+## 10. Configuracao do tmux e do ambiente (nao normativa; para quem instala)
+- `set -g extended-keys on` (o Pi avisa "Modified Enter keys may not work" sem isso).
+- `set -g remain-on-exit on` ou `failed`: preserva o painel morto com `pane_dead_status` (o daemon trata painel morto como ausente; a opcao so ajuda a ver a saida).
+- Marcar cada painel de agente: `tmux set-option -p -t PAINEL @agentd NOME` (ou lancar com `new-window` e marcar em seguida).
+- Latencia: um ciclo e 1 `list-panes` + 1 `capture-pane` por agente (algumas dezenas de KiB); `poll_ms` 2000 e confortavel.
+
+## 11. Contrato testavel (testes independentes; o `tmux` e FALSO: script controlado que serve `list-panes` e `capture-pane` a partir de um diretorio de cenario, com telas das `rules/fixtures/`, e registra cada chamada)
+- **R1** golden: para cada `golden` do arquivo de regras, o tmux falso serve a tela (e o titulo) e, apos o numero de ciclos necessario, `agent.get` traz `state`, `blocked_reason`, `rule`, `input` e `marks` esperados; `working`/`blocked` na primeira leitura; `idle` so apos confirmacao.
+- **R2** `unknown`: tela que nenhuma regra casa (texto qualquer, tela vazia, tela de outro programa) => `unknown`, marca `unmatched`, sem `error`, `rule: null`, **nunca `idle`**; falhas: saida nao zero, saida invalida (`source_bad_output`), `capture-pane` falhando so de um agente (o outro segue), tela > 256 KiB, stdout do `list-panes` > 1 MiB, `pane_id` duplicado, `tag` ambigua (`pane_ambiguous`), servidor tmux fora (`source_exit_nonzero`, nunca `gone`).
+- **R3** lista fechada: o tmux falso registra por 10 ciclos **apenas** `list-panes -a -F ...` (uma vez por ciclo) e `capture-pane -p -e -J -t %N` (uma vez por agente presente e identificado); jamais `send-keys` nem outro subcomando; jamais captura painel nao configurado, morto ou com shell em primeiro plano; nunca dois processos em voo.
+- **R4** sem shell: `tag`, `pane`, `tmux_bin`, `tmux_socket` com `;`, `$()`, espacos e aspas nao executam nada.
+- **R5** privacidade: sentinela unica na tela, no titulo, no stderr do tmux falso, na saida invalida e no cwd nunca aparece em `agent.*`, `status`, eventos, CLI nem log; `rule` mostra so ids do arquivo.
+- **R6** confirmacao de `idle` (5'): leitura `idle` isolada entre `working` nao muda o publicado (`idle_unconfirmed`); duas consecutivas **com mesmo par, mesmo `window_activity`, mesma `rule` e `idle_confirm_ms` decorrido** confirmam; `window_activity` que muda em qualquer leitura, par que muda, `rule` que muda, erro, ausencia, `unknown` ou nao-`idle` no meio **zeram**; `working` e `blocked` imediatos; `idle_confirm_polls:1` com `idle_confirm_ms:0` e imediato. **Falso idle do Codex:** sequencia de telas parecidas com ociosas mas com spinner no titulo => `working` o tempo todo; fim do spinner => `idle` so apos a janela.
+- **R7** caixa de entrada: tela de cada agente com caixa vazia, rascunho, **sugestao fantasma do Claude e placeholder do Codex (`.ansi`, dim)**, cursor invertido do Pi, rascunho de varias linhas (Pi) => `empty | draft`; localizador que falha (menu aberto) => `unknown`; estado diferente de `idle` => `input: null`; mudar so `input` **nao** gera evento.
+- **R8** marca `background`: Claude com subagente em segundo plano e principal livre => `idle` com `background`; sem a lista de agentes a marca sai; a marca nao muda o estado; mudar so a marca gera evento.
+- **R9** precedencia: telas que casam regras de mais de um estado (dialogo + `esc to interrupt`; titulo `Action Required` com spinner) => `blocked` > `working` > `idle`; duas `blocked` que casam => a `reason` da primeira do arquivo.
+- **R10** painel: `pane_pid` muda => evento, `unknown,error`, janela zerada; painel some, morre (`pane_dead=1`) ou volta ao shell (`zsh`) => ausente: `unknown,error` ate `gone_after_s` (inclusivo) e entao `gone`; lista vazia apos erros nao produz `gone` imediato; `gone` volta com evento.
+- **R11** arquivo de regras: campo desconhecido, chave duplicada, regex invalida, `kind` sem entrada, regra sem fixture, `reason` ausente em `blocked` ou presente em outro estado, `mode 0666` => nao sobe (saida 1); `agentd rules check` saida 0/1/2, mensagem sem conteudo de tela, e **falha se uma regra nao tem fixture que a case**.
+- **R12** configuracao: `type: herdr` recusado; `kind` fora da lista; `pane`/`tag` invalidos ou repetidos; `rules_file` ausente; limites da rev4.
+- **R13** `stale` e `gone` e limites exatos (G3, G4, G18 da rev4) refeitos sobre o tmux falso: leitura travada => `unknown,error`, depois `stale` com `last_known`; no limite exato de `stale_after_ms` nao, de `gone_after_s` sim.
+- **R14** atomicidade, protocolo, assinante lento, reinicio e CLI (G5, G6, G9, G10, G12, G14, G20, G22 da rev4) com a fonte falsa trocada; `since`/`blocked_reason` (G23 a G29 da secao 14) com a emenda acima.
+- **R15** regressao dos sinais medidos (uma por linha, cada uma com a tela real): Claude diálogo de **plano sem `Esc to cancel`** => `blocked`/`permission`; menu `/model` => `blocked`/`user_input`; pergunta ao usuario => `blocked`/`user_input`; confianca de pasta => `blocked`/`permission`; Claude em 60 colunas trabalhando => `working`; Codex dialogo `[ . ]` e `[ ! ]` => `blocked`; Codex `Update available` => `blocked`; Codex visualizador de transcricao => `blocked`; Pi `Working` em 50 colunas => `working`; Pi seletor `/model` => `blocked`.
+- **R17** janela do Enter no Claude (limite 1 do Anexo A): tela de rascunho/eco logo apos o envio seguida, uma leitura depois, da tela `working` => o estado publicado nunca e `idle`; `idle` vindo de `working` com a mesma tela de rascunho estavel por `idle_confirm_ms` confirma (e `input: draft`).
+- **R16** deriva de versao: com as telas gravadas de **outra versao** (`tested_versions` nao inclui) o resultado e `unknown`/`unmatched` quando nenhuma regra casa, **nunca `idle`**.
+
+## 12. Fora desta spec
+Entrega de mensagem (enviar teclas, verificar ocioso e caixa vazia antes e depois): programa proprio (`wakerd`), com seu proprio `capture-pane`; **despertar e integracao do Pi: fase F7** (aqui o Pi entra so como regra de estado, decisao do Jabbur em 2026-10-16); fonte `declared` e hooks dos agentes (Anexo da rev4; sem metodo de escrita na v1); modo de controle do tmux (`-C`) para eventos em vez de polling; `monitor-silence`; barra de status do tmux lendo o `agentd`; integracao com o `chatd`.
+**Nao medido (viram `unknown` ate haver tela gravada):** Claude em `acceptEdits`/`bypassPermissions` (rodape diferente), durante `/compact` longo, erro ou limite de cota; Codex em aprovacao de edicao de arquivo e em outros modos de sandbox; Pi com extensoes de aprovacao; terminais abaixo de ~40 colunas (rodape truncado); Claude com tela alternativa e historico (`capture-pane` ve so a janela visivel); varios paineis por janela.
+
+## Anexo A (normativo para a v1 de dados): regras iniciais
+Regioes `tail:N` contam linhas nao vazias. Todas as regex em sintaxe do crate `regex`; fixtures citadas existem em `crates/agentd/rules/fixtures/` (`NOME.screen` = saida do `capture-pane -p -e -J`, ou texto plano; `NOME.title` = titulo do painel, uma linha, opcional).
+
+**Claude (`identify.commands`: `claude`)**
+| id | estado | `all` (regiao: regex) | `none` |
+|---|---|---|---|
+| `claude.blocked.permission` | blocked/permission | `tail:12`: `^\s*Do you want to .+\?\s*$` e `tail:12`: `Esc to cancel` | |
+| `claude.blocked.plan` | blocked/permission | `tail:12`: `Would you like to proceed\?` e `tail:12`: `^\s*❯ 1\. ` | |
+| `claude.blocked.trust` | blocked/permission | `tail:12`: `Quick safety check` e `tail:12`: `Enter to confirm` | |
+| `claude.blocked.menu` | blocked/user_input | `tail:3`: `Esc to cancel` | |
+| `claude.working.footer` | working | `tail:8`: `esc to interrupt` | |
+| `claude.idle.box` | idle | `tail:8`: `^❯` e `tail:8`: `^\s*(⏸|⏵⏵) ` (rodape de modo) | `tail:8`: `esc to interrupt`; `tail:12`: `Esc to cancel` |
+| marca `claude.mark.background` | `background` | `screen`: `(Waiting for \d+ background agent|^\s*◯ )` | |
+`input`: `between` `^─{20,}$`, `strip_prefix` `^(?:❯|›) ?`.
+
+**Codex (`identify.commands`: `codex`)**
+| id | estado | `all` | `none` |
+|---|---|---|---|
+| `codex.blocked.title` | blocked/permission | `title`: `Action Required` | |
+| `codex.blocked.approval` | blocked/permission | `tail:12`: `Would you like to .+\?` e `tail:12`: `Press enter to confirm or esc to cancel` | |
+| `codex.blocked.menu` | blocked/user_input | `tail:3`: `(enter select · esc back|Browsing transcript|enter continue · esc skip)` | |
+| `codex.working.title` | working | `title`: `^[\x{2800}-\x{28FF}]` | |
+| `codex.working.screen` | working | `tail:8`: `esc to interrupt` | |
+| `codex.idle.box` | idle | `tail:6`: `^›` e `tail:3`: `^\s+\S.* · [/~]` (linha de modelo e diretorio) | |
+`input`: `line` `tail:6` `^›`, `strip_prefix` `^› ?`.
+
+**Pi (`identify.commands`: `pi`)**
+| id | estado | `all` | `none` |
+|---|---|---|---|
+| `pi.blocked.menu` | blocked/user_input | `tail:6`: `Escape/Ctrl\+C to cancel` | |
+| `pi.working.ruler` | working | `tail:6`: `^── [\x{280B}\x{2819}\x{2839}\x{2838}\x{283C}\x{2834}\x{2826}\x{2827}\x{2807}\x{280F}] Working ─+$` | |
+| `pi.idle.box` | idle | `tail:6`: `^─{20,}$` com `min: 2` e `tail:2`: `\$\d+\.\d{3}` | |
+`input`: `between` `^─{20,}$`, sem `strip_prefix`.
+
+**Limites conhecidos dessas regras (medidos, nao escondidos):**
+1. **Claude, janela de ~0,5 s depois do Enter:** antes de o rodape ganhar `esc to interrupt`, a tela e **identica a de um rascunho humano** (caixa com texto, rodape de modo): sai `idle` com `input: draft`. Quem protege e a confirmacao da regra 5' (duas leituras, `window_activity` igual, `idle_confirm_ms`): o estado publicado nao vira `idle` por causa dessa janela (teste R17).
+2. **Claude com rascunho:** o rodape perde a dica `? for shortcuts`; por isso a regra de `idle` usa so o simbolo de modo (`⏸`/`⏵⏵`). Modos de rodape nao medidos (`accept edits`, `bypass`) so casam se usarem esses simbolos; senao, `unknown`.
+3. **Codex com rascunho:** o rodape perde `? for shortcuts` e a regra usa a linha de modelo e diretorio (` · /caminho`). Na partida o titulo do Codex tem spinner enquanto carrega: conta como `working`.
+4. **Menus de comando (`/model` no Claude e no Codex, autocompletar) dentro da caixa** aparecem como `idle` com `input: draft` quando o menu e so a lista de sugestoes; o seletor modal (com `Esc to cancel`/`enter select`) e `blocked`.
+
+(O Anexo A e o ponto de partida: o proprio `rules check` e a lista de fixtures da secao seguinte decidem se cada regra se sustenta. Qualquer discrepancia entre estas regex e as telas reais vence a **tela real**, e a regex e corrigida.)
+
+## Anexo B: fixtures e como gravar
+Pasta `crates/agentd/rules/fixtures/{claude,codex,pi}/`. Cada fixture e um par `NOME.screen` + `NOME.title`. Nomes: `idle`, `idle-manual`, `working-*`, `permission-*`, `plan`, `trust`, `menu-model`, `ask-user`, `slash-menu`, `narrow-working`, `background`, `steering-queue`, `interrupted`, `transcript`, `update-banner`, `approval-dot`, `approval-bang`; para a caixa (gravadas com `-e`): `box-empty`, `box-draft`, `box-draft-multiline`, `box-placeholder` (Codex), `box-ghost` (Claude: a linha da caixa foi gravada com `-e` numa sessao real e colada na tela do mesmo turno, porque a sugestao nao reaparece de forma reproduzivel). As fixtures de estado em texto plano vem de `capture-pane -p -J` e as `box-*` de `-e`; todas passam por sanitizacao de caminhos e do nome da maquina. Gravar: num tmux **isolado** (`tmux -S SOCKET -f /dev/null`), `tmux capture-pane -p -e -J -t ALVO > NOME.screen` e `tmux display -p -t ALVO '#{pane_title}' > NOME.title`; **sanitizar** caminhos do usuario (`/home/...`, diretorios temporarios) trocando por `/work/proj` e conferir que nao ha chave, token, e-mail nem texto de conversa real; registrar a versao do agente em `tested_versions`.
+
+## Historico
+| Fonte | Achado | Onde ficou |
+|---|---|---|
+| Decisao A22 (Jabbur, 2026-10-16) | tmux unico multiplexador; fonte `herdr` descartada | secoes 4, 7 |
+| Leitura do herdr e do Luvus | sem regra casando = `idle`; empate de prioridade; carencia; texto plano da grade | secoes 2, 6 |
+| Laboratorio tmux (rodadas 1 e B) | hooks nao cobrem Esc; titulo cobre o falso idle do Codex; dialogo de plano sem `Esc to cancel`; sugestao fantasma e placeholder dim; subagente em segundo plano; `window_activity` constante em ocioso | secoes 1, 5, 6, Anexo A |
