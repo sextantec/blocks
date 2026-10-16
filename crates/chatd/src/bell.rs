@@ -1,5 +1,6 @@
 //! Campainha (adaptador herdr, spec 8): so toca em `idle`/`done`, texto fixo, sem shell, limite de 5 s.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,15 +16,21 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(5);
 const CMD_OUT_MAX: u64 = 64 * 1024;
 const TICK: Duration = Duration::from_millis(50);
 
-struct RingTarget {
-    mux: Mux,
-    pane: String,
-    binding: Option<Binding>,
+enum RingTarget {
+    Mux {
+        mux: Mux,
+        pane: String,
+        binding: Option<Binding>,
+    },
+    CodexQueue {
+        thread_file: String,
+    },
 }
 
 pub fn run(shared: &Shared, shutdown: &AtomicBool) {
     let poll = Duration::from_millis(shared.cfg.bell_poll_ms);
     let rearm = Duration::from_secs(shared.cfg.bell_rearm_s);
+    let mut codex_retry_at = HashMap::<String, Instant>::new();
     while !shutdown.load(Ordering::SeqCst) {
         let due: Vec<String> = {
             let st = lock(&shared.store);
@@ -33,7 +40,17 @@ pub fn run(shared: &Shared, shutdown: &AtomicBool) {
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            ring(shared, &name);
+            let now = Instant::now();
+            if codex_retry_at
+                .get(&name)
+                .is_some_and(|retry_at| now < *retry_at)
+            {
+                continue;
+            }
+            codex_retry_at.remove(&name);
+            if let Some(delay) = ring(shared, &name, rearm) {
+                codex_retry_at.insert(name, Instant::now() + delay);
+            }
         }
         let until = Instant::now() + poll;
         while Instant::now() < until && !shutdown.load(Ordering::SeqCst) {
@@ -42,34 +59,52 @@ pub fn run(shared: &Shared, shutdown: &AtomicBool) {
     }
 }
 
-fn ring(shared: &Shared, name: &str) {
+fn ring(shared: &Shared, name: &str, rearm: Duration) -> Option<Duration> {
     let target = match resolve_target(shared, name) {
         Ok(target) => target,
-        Err(reason) => return record_failed(shared, name, reason),
+        Err(reason) => {
+            record_failed(shared, name, reason);
+            return None;
+        }
     };
-    let Some(target) = target else {
-        return;
-    };
-    // Desligada por padrao: recuse antes da verificacao que executaria `tmux display-message`.
-    if target.mux == Mux::Tmux && !shared.cfg.bell_tmux_typing {
-        return record_failed(shared, name, "tmux_typing_disabled");
-    }
-    if let Some(binding) = &target.binding
-        && !binding::verify(
-            &shared.cfg,
-            name,
-            target.mux,
-            &target.pane,
-            binding.peer_pid,
-        )
-    {
-        return record_failed(shared, name, "unbound");
-    }
+    let target = target?;
     let n = lock(&shared.store).pending_count(name);
     if n == 0 {
-        return;
+        return None;
     }
-    match send_prompt(shared, target.mux, &target.pane, n) {
+    if let RingTarget::CodexQueue { thread_file } = target {
+        return match crate::codex_queue::send_prompt(&shared.cfg, &thread_file, n) {
+            Ok(()) => {
+                if let Err(e) = lock(&shared.store).bell_sent(name, Instant::now()) {
+                    eprintln!("chatd: aviso: nao registrei bell_sent: {}", e.message);
+                }
+                None
+            }
+            Err(reason) => {
+                record_failed(shared, name, reason);
+                Some(if reason == "timeout" {
+                    rearm
+                } else {
+                    Duration::from_secs(60)
+                })
+            }
+        };
+    }
+    let RingTarget::Mux { mux, pane, binding } = target else {
+        return None;
+    };
+    // Desligada por padrao: recuse antes da verificacao que executaria `tmux display-message`.
+    if mux == Mux::Tmux && !shared.cfg.bell_tmux_typing {
+        record_failed(shared, name, "tmux_typing_disabled");
+        return None;
+    }
+    if let Some(binding) = &binding
+        && !binding::verify(&shared.cfg, name, mux, &pane, binding.peer_pid)
+    {
+        record_failed(shared, name, "unbound");
+        return None;
+    }
+    match send_prompt(shared, mux, &pane, n) {
         Ok(true) => {
             if let Err(e) = lock(&shared.store).bell_sent(name, Instant::now()) {
                 eprintln!("chatd: aviso: nao registrei bell_sent: {}", e.message);
@@ -78,26 +113,34 @@ fn ring(shared: &Shared, name: &str) {
         Ok(false) => {}
         Err(reason) => record_failed(shared, name, reason),
     }
+    None
 }
 
 fn resolve_target(shared: &Shared, name: &str) -> Result<Option<RingTarget>, &'static str> {
+    if let Some(Delivery::CodexQueue { thread_file }) =
+        shared.cfg.recipients.get(name).map(|r| &r.delivery)
+    {
+        return Ok(Some(RingTarget::CodexQueue {
+            thread_file: thread_file.clone(),
+        }));
+    }
     let binding = active_binding(shared, name);
     match (
         shared.cfg.recipients.get(name).map(|r| &r.delivery),
         binding,
     ) {
-        (Some(Delivery::Auto), Some(binding)) => Ok(Some(RingTarget {
+        (Some(Delivery::Auto), Some(binding)) => Ok(Some(RingTarget::Mux {
             mux: binding.mux,
             pane: binding.pane.clone(),
             binding: Some(binding),
         })),
         (Some(Delivery::Auto), None) => Err("unbound"),
-        (Some(Delivery::Bell { .. }), Some(binding)) => Ok(Some(RingTarget {
+        (Some(Delivery::Bell { .. }), Some(binding)) => Ok(Some(RingTarget::Mux {
             mux: binding.mux,
             pane: binding.pane.clone(),
             binding: Some(binding),
         })),
-        (Some(Delivery::Bell { pane }), None) => Ok(Some(RingTarget {
+        (Some(Delivery::Bell { pane }), None) => Ok(Some(RingTarget::Mux {
             mux: Mux::Herdr,
             pane: pane.clone(),
             binding: None,

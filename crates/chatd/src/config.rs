@@ -16,6 +16,8 @@ pub enum Delivery {
     Auto,
     /// Sem campainha: o agente usa `chatd watch`.
     Watch,
+    /// Enfileira a campainha numa thread Codex identificada por arquivo.
+    CodexQueue { thread_file: String },
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +34,10 @@ impl Recipient {
 
 impl Delivery {
     pub fn is_bell(&self) -> bool {
-        matches!(self, Delivery::Bell { .. } | Delivery::Auto)
+        matches!(
+            self,
+            Delivery::Bell { .. } | Delivery::Auto | Delivery::CodexQueue { .. }
+        )
     }
 }
 
@@ -41,6 +46,8 @@ pub struct Config {
     pub auth_required: bool,
     pub herdr_bin: String,
     pub tmux_bin: String,
+    pub codex_bin: String,
+    pub codex_versions: Vec<String>,
     /// Permite digitar a campainha no tmux; inseguro porque nao verifica se o painel esta ocioso.
     pub bell_tmux_typing: bool,
     pub bell_poll_ms: u64,
@@ -63,6 +70,8 @@ struct Raw {
     auth: Option<String>,
     herdr_bin: Option<String>,
     tmux_bin: Option<String>,
+    codex_bin: Option<String>,
+    codex_versions: Option<Vec<String>>,
     bell_tmux_typing: Option<bool>,
     bell_poll_ms: Option<u64>,
     bell_rearm_s: Option<u64>,
@@ -91,6 +100,7 @@ struct RawRoles {
 struct RawRecipient {
     delivery: Option<String>,
     pane: Option<String>,
+    thread_file: Option<String>,
     agent: Option<String>,
 }
 
@@ -115,6 +125,17 @@ pub fn parse(text: &str) -> Result<Config, String> {
     if tmux_bin.is_empty() || tmux_bin.contains('\0') {
         return Err("config: tmux_bin invalido".to_string());
     }
+    let codex_bin = raw.codex_bin.unwrap_or_else(|| "codex".to_string());
+    if codex_bin.is_empty() || codex_bin.contains('\0') {
+        return Err("config: codex_bin invalido".to_string());
+    }
+    let codex_versions = raw.codex_versions.unwrap_or_default();
+    if codex_versions
+        .iter()
+        .any(|v| v.is_empty() || v.contains('\0'))
+    {
+        return Err("config: codex_versions contem versao invalida".to_string());
+    }
     let bell_poll_ms = raw.bell_poll_ms.unwrap_or(5000);
     if bell_poll_ms < 50 {
         return Err("config: bell_poll_ms deve ser de no minimo 50".to_string());
@@ -138,6 +159,13 @@ pub fn parse(text: &str) -> Result<Config, String> {
         }
         let delivery = parse_delivery(&name, rec)?;
         recipients.insert(name, Recipient { delivery, agent });
+    }
+    if recipients
+        .values()
+        .any(|r| matches!(r.delivery, Delivery::CodexQueue { .. }))
+        && codex_versions.is_empty()
+    {
+        return Err("config: codex_versions obrigatoria para delivery codex-queue".to_string());
     }
     let blocked_receipts = raw
         .features
@@ -171,6 +199,8 @@ pub fn parse(text: &str) -> Result<Config, String> {
         auth_required,
         herdr_bin,
         tmux_bin,
+        codex_bin,
+        codex_versions,
         bell_tmux_typing: raw.bell_tmux_typing.unwrap_or(false),
         bell_poll_ms,
         bell_rearm_s,
@@ -182,22 +212,28 @@ pub fn parse(text: &str) -> Result<Config, String> {
 }
 
 fn parse_delivery(name: &str, rec: RawRecipient) -> Result<Delivery, String> {
-    match (rec.delivery.as_deref(), rec.pane) {
-        (Some("bell"), Some(pane)) if valid_pane(&pane) => Ok(Delivery::Bell { pane }),
-        (Some("bell"), _) => Err(format!(
+    match (rec.delivery.as_deref(), rec.pane, rec.thread_file) {
+        (Some("bell"), Some(pane), None) if valid_pane(&pane) => Ok(Delivery::Bell { pane }),
+        (Some("bell"), _, _) => Err(format!(
             "config: '{name}' com delivery bell exige pane valido"
         )),
-        (Some("watch"), None) => Ok(Delivery::Watch),
-        (Some("watch"), Some(_)) => Err(format!(
-            "config: '{name}' com delivery watch nao aceita pane"
+        (Some("watch"), None, None) => Ok(Delivery::Watch),
+        (Some("watch"), _, _) => Err(format!(
+            "config: '{name}' com delivery watch nao aceita pane/thread_file"
         )),
-        (Some("auto"), None) => Ok(Delivery::Auto),
-        (Some("auto"), Some(_)) => Err(format!(
-            "config: '{name}' com delivery auto nao aceita pane"
+        (Some("auto"), None, None) => Ok(Delivery::Auto),
+        (Some("auto"), _, _) => Err(format!(
+            "config: '{name}' com delivery auto nao aceita pane/thread_file"
         )),
-        (None, _) => Err(format!("config: '{name}' sem delivery (bell ou watch)")),
-        (Some(_), _) => Err(format!(
-            "config: delivery de '{name}' deve ser bell, watch ou auto"
+        (Some("codex-queue"), None, Some(path)) if Path::new(&path).is_absolute() => {
+            Ok(Delivery::CodexQueue { thread_file: path })
+        }
+        (Some("codex-queue"), _, _) => Err(format!(
+            "config: '{name}' com delivery codex-queue exige thread_file absoluto e nao aceita pane"
+        )),
+        (None, _, _) => Err(format!("config: '{name}' sem delivery (bell ou watch)")),
+        (Some(_), _, _) => Err(format!(
+            "config: delivery de '{name}' deve ser bell, watch, auto ou codex-queue"
         )),
     }
 }

@@ -5,6 +5,7 @@ mod bell;
 mod binding;
 mod blobs;
 mod client;
+mod codex_queue;
 mod config;
 mod hash;
 mod obligations;
