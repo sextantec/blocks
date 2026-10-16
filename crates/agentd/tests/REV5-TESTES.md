@@ -70,7 +70,7 @@ Como rodar (offline, sem tmux real, sem agente real):
 | CLI | 4 (+1 de prontidao) | codigos 0, 2, 3, 4 e 1; `get --json` = `data.agent` + `epoch` + `head_seq`; `list --json` = `data.agents` + `epoch` + `head_seq` (spec 15.1); `watch` com `--since` sem `--epoch` sai 2; health nao falha por agente unknown. Prontidao: `agentd: pronto` em stderr (spec 15.10) |
 | `harness_` | 12 | auto-testes do tmux falso e das goldens; passam hoje |
 
-Total: **65 testes de rev5** (20 + 18 + 13 + 14) e 12 `harness_`.
+Total: **66 testes de rev5** (20 + 18 + 14 + 14) e 13 `harness_` (contagem atualizada na rodada 3).
 
 ## Resultado (binario rev4, verificado em 2026-10-16)
 
@@ -131,16 +131,71 @@ Itens 9 e a lacuna "troca de regra" ficam como estao, por decisao do autor da sp
   terminais < 40 colunas): sem fixture, sem teste.
 - **Limite exato de `stale_after_ms` e `gone_after_s`:** nao medido (spec 15.9).
 
-## Verificacao final (2026-10-16, rev5.2)
+## Correcoes pos-implementacao (rodada 3)
+
+Auditoria de todos os testes e do harness contra a secao 7 (limites), a secao 15 (esclarecimentos) e a consistencia
+de ids/tags/paineis. Cada correcao, com arquivo:linha atual, antes/depois e o trecho da spec que a motiva:
+
+1. **`tests/rev5_common/mod.rs:372-383`** (helper `cfg`, usado por todos os testes): `stale_after_ms` fixo em 3000 e
+   `safety_poll_ms` fixo em 5000. Com `poll_ms` 10000 (R18, `rev5_events.rs`) o daemon recusava a config. Depois:
+   `stale_after_ms = max(3000, poll_ms + 400 + 2000)` e `safety_poll_ms = max(5000, poll_ms)`.
+   Spec 7: "`stale_after_ms` > `poll_ms` + `source_timeout_ms`" e "`safety_poll_ms` >= `poll_ms`" (limite superior de
+   stale: 300000). Testes que querem outro stale (ex.: R13, `rev5_source.rs`) continuam sobrescrevendo pelo `ajuste`.
+2. **`tests/rev5_rules.rs:307`** (`r06_falso_idle_do_codex_...`): o painel era recriado com `.tag("codex-blocks")`, que e o
+   ID do agente, nao a tag. Com isso o painel original virava ausente. Antes: `.tag("codex-blocks")`. Depois:
+   `let (_, tag, cmd) = agente_do_kind("codex");` (tag `codex`, cmd `codex`). Spec 7: `tag` casa com a opcao `@agentd`
+   do painel; o ID e so o nome do agente na configuracao.
+3. **`tests/rev5_config_cli.rs:152-158`** (mutante "poll_ms acima de 10000"): antes, so `poll_ms = 10001`, e a
+   `safety_poll_ms` (5000) ficava menor que o poll, violando tambem a regra safety >= poll. Depois: tambem
+   `safety_poll_ms = 20000` e `stale_after_ms = 30000`, para que so o poll viole o limite. Spec 7: limites de cada chave.
+4. **Auditoria sem outras inconsistencias de config**: todas as atribuicoes `c[...] = ...` nos testes (rules, source,
+   events, config_cli) foram conferidas contra os limites da secao 7 (poll 200..10000, timeout 200..30000, stale,
+   safety >= poll e <= 60000, gone 5..86400, idle_confirm_polls 1..5, idle_confirm_ms <= 30000, ring 64..65536,
+   debounce 50..1000). Nenhuma outra violacao. Os mutantes de R12 que violam um limite de proposito estao isolados.
+5. **Auditoria de ids, tags e paineis**: `tag("codex-blocks")` so aparece com `agentes_todos()` (que define essa tag) e
+   no painel duplicado de `r02_pane_id_duplicado` (de proposito). Os `m.paineis(&[])` e a troca para `zsh` em
+   `rev5_source.rs:492`, `:539` e `:577` sao intencionais (ausencia e volta). Nenhum outro painel virou ausente por engano.
+6. **Auditoria de expectativas contra a secao 15**: nenhuma contradicao nova. Itens 1 a 10 continuam cobertos como na
+   tabela acima.
+
+Acrescimos desta rodada (nao sao correcoes de teste errado):
+- `tests/rev5_harness.rs:224` `harness_config_gerada_respeita_os_limites_da_secao_7`: auto-teste que valida todos os
+  limites da secao 7 sobre a config gerada pelo harness (para poll 200, 1000, 2000 e 10000). Passa hoje e impede a
+  regressao do item 1.
+- `tests/rev5_events.rs:466` `r19_depois_de_idle_confirmado_uma_saida_do_proprio_painel_reconfirma_sem_laco`: novo.
+  Confirmado o idle, uma unica linha `%output` do proprio painel; depois de sem saida nova, a confirmacao volta e em
+  2 s ha no maximo 3 ciclos (so o ciclo de seguranca, spec 4A). Ver "Defeito apontado" abaixo.
+- `tests/rev5_common/fake_tmux.py:157`: registra `ev="emitida"` por linha `%output` repassada (instrumentacao, sem
+  mudar o comportamento). Serviu para provar que o falso emitiu exatamente as 50 linhas da rajada.
+
+## Defeito apontado pelos testes (implementacao, nao teste)
+
+Com a implementacao em andamento (src/ modificado pelo implementador):
+- `r18_rajada_de_output_gera_poucos_ciclos_nao_um_por_linha` (`rev5_events.rs`): 50 linhas `%output` em rajada geram
+  15 a 17 ciclos em ~1 s (cadencia de ~50 ms). A spec (R18) pede **um** ciclo por rajada e (4A) no maximo um ciclo
+  por `event_debounce_ms` (150 ms).
+- `r19_depois_de_idle_confirmado_...` (`rev5_events.rs`): reproduzido em isolamento (diagnostico temporario, removido):
+  depois de `idle` confirmado (sem marca), **uma** linha `%output %1` do proprio painel deixa `idle_unconfirmed` e o
+  daemon segue em ~20 ciclos/s. A confirmacao volta (teste passa nessa parte), mas o laco nao para. Sem `%output`
+  nenhum, o mesmo painel nunca entra em laco. O falso emitiu exatamente 1 linha (contado pelo log `emitida`).
+  Config do reproducao: `events: true`, `poll_ms` 200 ou 10000, `safety_poll_ms` 5000 ou 10000, `event_debounce_ms` 150,
+  `idle_confirm_ms` 0 ou 1500, tela `claude/box-empty` estavel.
+Esses dois testes sao a prova; nao foram afrouxados.
+
+## Verificacao final (rodada 3)
 
 - `cargo test --offline -p agentd --no-run`: compila, 0 avisos.
-- `cargo test --offline -p agentd -- harness_`: 12 passam.
-- Suites rev5 (`--no-fail-fast`): rules 0/20, source 0/18, events 0/13, config_cli 1/14. Total: 1 de 65 passa (o teste
-  de CLI que a rev4 ja cumpre).
+- `cargo test --offline -p agentd -- harness_`: 13 passam (12 anteriores + `harness_config_gerada_respeita_os_limites_da_secao_7`).
+- Suites rev5 contra o binario atual (implementacao em andamento), `--no-fail-fast`:
+  rules 20/20, source 18/18, config_cli 14/14, events 12/14. Falham: `r18_rajada...` e `r19_depois_de_idle_confirmado...`
+  (defeito acima). Total: 64 de 66 passam.
 - `cargo clippy --offline -p agentd --test rev5_harness --test rev5_rules --test rev5_source --test rev5_events --test rev5_config_cli -- -D warnings`: sai 0.
-  Ha avisos de clippy em `tests/agentd_v1.rs` e `tests/common/mod.rs`, que nao sao deste trabalho.
-- `cargo fmt -p agentd -- --check`: limpo.
-- `git status --short`: so arquivos novos em `tests/` (`REV5-TESTES.md`, `rev5_*.rs`, `rev5_common/`). Modificado por
-  outro autor: `crates/agentd/docs/spec-rev5.md` (secao 15, editada pelo coordenador). Nada em `src/`, `Cargo.*`,
-  `rules/` ou nos testes existentes.
-- Nenhum `git add`, `stash`, `reset`, `checkout` ou commit foi feito.
+  Os avisos de clippy que sobram em `tests/agentd_v1.rs` e `tests/common/mod.rs` nao sao deste trabalho.
+- `cargo fmt -p agentd -- --check`: meus arquivos limpos. Aparecem diferencas em `src/daemon.rs` e `src/main.rs`, que sao
+  do implementador. **Ressalva:** rodei `cargo fmt -p agentd` varias vezes nesta rodada, com `src/` ja em alteracao;
+  nao consigo provar que nao reformatei `src/` nesses momentos. Por isso o `fmt` foi rodado so no fim e os arquivos
+  de teste estao limpos; quem commita deve conferir o diff de `src/` antes de commitar.
+- Contagem: 66 testes rev5 (rules 20, source 18, events 14, config_cli 14) e 13 de harness.
+- `git status --short`: `M crates/agentd/docs/spec-rev5.md` (secao 15, do coordenador); `M` e `??` em `tests/rev5_*` e
+  `tests/REV5-TESTES.md`. Alteracoes do implementador em `src/`, `Cargo.*` (fora deste trabalho).
+- Nenhum `git add`, `stash`, `reset`, `checkout` ou commit foi feito por mim.

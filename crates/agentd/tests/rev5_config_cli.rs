@@ -150,7 +150,12 @@ fn r12_configuracoes_invalidas_nao_sobem() {
         ),
         (
             "poll_ms acima de 10000",
-            Box::new(|c: &mut Value| c["poll_ms"] = json!(10001)),
+            // Isolado: stale e safety ficam validos para 10001, so o poll viola o limite.
+            Box::new(|c: &mut Value| {
+                c["poll_ms"] = json!(10001);
+                c["safety_poll_ms"] = json!(20000);
+                c["stale_after_ms"] = json!(30000);
+            }),
         ),
         (
             "stale_after_ms <= poll_ms + source_timeout_ms",

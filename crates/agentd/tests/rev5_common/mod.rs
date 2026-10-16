@@ -365,6 +365,12 @@ pub fn cfg(m: &Mundo, regras: &Path, poll_ms: u64, agentes: &[(&str, &str, &str)
             json!({"kind": kind, "sources": [{"type": "tmux", "tag": tag}]}),
         );
     }
+    // Spec secao 7: stale_after_ms > poll_ms + source_timeout_ms (e <= 300000) e safety_poll_ms >= poll_ms.
+    // Os valores abaixo respeitam isso para qualquer poll_ms de 200 a 10000; testes que querem outro
+    // stale ou outro safety sobrescrevem pelo `ajuste`.
+    const TIMEOUT_MS: u64 = 400;
+    let stale_ms = std::cmp::max(3000, poll_ms + TIMEOUT_MS + 2000);
+    let safety_ms = std::cmp::max(5000, poll_ms);
     json!({
         "tmux_bin": s(&m.tmux),
         "tmux_socket": null,
@@ -372,9 +378,9 @@ pub fn cfg(m: &Mundo, regras: &Path, poll_ms: u64, agentes: &[(&str, &str, &str)
         "poll_ms": poll_ms,
         "events": false,
         "event_debounce_ms": 150,
-        "safety_poll_ms": 5000,
-        "source_timeout_ms": 400,
-        "stale_after_ms": 3000,
+        "safety_poll_ms": safety_ms,
+        "source_timeout_ms": TIMEOUT_MS,
+        "stale_after_ms": stale_ms,
         "gone_after_s": 5,
         "idle_confirm_polls": 2,
         "idle_confirm_ms": 0,

@@ -154,6 +154,7 @@ def attach(c, alvo):
                 return 0
             sys.stdout.buffer.write(linha + b"\n")
             sys.stdout.buffer.flush()
+            registra(ev="emitida", tam=len(linha))
             if linha.startswith(b"%exit"):
                 return 0
         time.sleep(0.02)

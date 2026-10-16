@@ -219,3 +219,87 @@ fn harness_config_base_tem_o_contrato_de_tmux() {
     assert_eq!(c["tmux_bin"], s(&m.tmux));
     assert!(c.get("herdr_bin").is_none());
 }
+
+#[test]
+fn harness_config_gerada_respeita_os_limites_da_secao_7() {
+    // Spec secao 7: se o harness gerar uma config fora dos limites, o daemon recusa e o teste deixa de
+    // exercitar o que queria (ex.: eventos). Este auto-teste pega isso antes.
+    let m = Mundo::novo();
+    let regras = regras_padrao();
+    for poll in [200u64, 1000, 2000, 10000] {
+        let c = cfg(&m, &regras, poll, &agentes_todos());
+        let p = c["poll_ms"].as_u64().unwrap();
+        let t = c["source_timeout_ms"].as_u64().unwrap();
+        let stale = c["stale_after_ms"].as_u64().unwrap();
+        let safety = c["safety_poll_ms"].as_u64().unwrap();
+        assert!(
+            (200..=10000).contains(&p),
+            "poll_ms fora de 200..10000: {p}"
+        );
+        assert!(
+            (200..=30000).contains(&t),
+            "source_timeout_ms fora de 200..30000: {t}"
+        );
+        assert!(
+            stale > p + t,
+            "stale_after_ms {stale} deve ser > poll {p} + timeout {t}"
+        );
+        assert!(stale <= 300000, "stale_after_ms acima de 300000: {stale}");
+        assert!(
+            (1000..=60000).contains(&safety),
+            "safety_poll_ms fora de 1000..60000: {safety}"
+        );
+        assert!(
+            safety >= p,
+            "safety_poll_ms {safety} deve ser >= poll_ms {p}"
+        );
+        let g = c["gone_after_s"].as_u64().unwrap();
+        assert!(
+            (5..=86400).contains(&g),
+            "gone_after_s fora de 5..86400: {g}"
+        );
+        let conf = c["idle_confirm_polls"].as_u64().unwrap();
+        assert!(
+            (1..=5).contains(&conf),
+            "idle_confirm_polls fora de 1..5: {conf}"
+        );
+        let ms = c["idle_confirm_ms"].as_u64().unwrap();
+        assert!(ms <= 30000, "idle_confirm_ms acima de 30000: {ms}");
+        let ring = c["ring"].as_u64().unwrap();
+        assert!(
+            (64..=65536).contains(&ring),
+            "ring fora de 64..65536: {ring}"
+        );
+        let deb = c["event_debounce_ms"].as_u64().unwrap();
+        assert!(
+            (50..=1000).contains(&deb),
+            "event_debounce_ms fora de 50..1000: {deb}"
+        );
+        let ags = c["agents"].as_object().unwrap();
+        assert!(ags.len() <= 32, "mais de 32 agentes");
+        for (id, a) in ags {
+            assert!(
+                id.len() <= 32
+                    && id.chars().all(|ch| ch.is_ascii_lowercase()
+                        || ch.is_ascii_digit()
+                        || ch == '-'
+                        || ch == '_'),
+                "id fora de [a-z0-9_-]{{1,32}}: {id}"
+            );
+            let tag = a["sources"][0]["tag"].as_str().unwrap();
+            assert!(
+                tag.len() <= 32
+                    && tag.chars().all(|ch| ch.is_ascii_lowercase()
+                        || ch.is_ascii_digit()
+                        || ch == '-'
+                        || ch == '_'),
+                "tag fora de [a-z0-9_-]{{1,32}}: {tag}"
+            );
+            assert_eq!(
+                a["sources"].as_array().unwrap().len(),
+                1,
+                "sources deve ter 1 elemento"
+            );
+        }
+    }
+}

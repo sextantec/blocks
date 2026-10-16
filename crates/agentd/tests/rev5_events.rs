@@ -461,3 +461,39 @@ fn r20_no_maximo_oito_clientes_de_eventos() {
     assert!(n <= 8, "R20: {n} clientes de eventos (limite 8)");
     assert_eq!(m.violacoes(), Vec::<Vec<String>>::new());
 }
+
+#[test]
+fn r19_depois_de_idle_confirmado_uma_saida_do_proprio_painel_reconfirma_sem_laco() {
+    // Spec 4A (gatilho) e 5' (confirmacao): com idle confirmado e uma unica linha %output do proprio
+    // painel, a janela reabre e fecha em idle_confirm_ms sem nova saida; e sem saida nova nao ha laco
+    // de ciclos (so o ciclo de seguranca, safety_poll_ms = 5000).
+    let mut m = Mundo::novo();
+    m.paineis(&[Painel::new("%1", "claude").tag("claude").sessao("$1")]);
+    m.tela_fixture("%1", "claude", "box-empty");
+    let srv = com_eventos(&m, 200, 5000, &[("claude", "claude", "claude")], |c| {
+        c["idle_confirm_ms"] = json!(1500);
+    });
+    assert!(espera_anexos(&m, 1, Duration::from_secs(5)));
+    let a = espera_estado(&srv.socket, "claude", "idle", Duration::from_secs(6));
+    assert_eq!(a["state"], "idle", "R19: idle inicial nao confirmou: {a}");
+
+    m.feed("$1", "%output %1 quadro");
+    let reconfirmou = espera(Duration::from_secs(6), || {
+        let x = agente(&srv.socket, "claude");
+        x["state"] == "idle" && !marcas(&x).contains("idle_unconfirmed")
+    });
+    assert!(
+        reconfirmou,
+        "R19 (spec 5'): depois de uma saida do proprio painel a confirmacao nao voltou sem nova saida: {}",
+        agente(&srv.socket, "claude")
+    );
+
+    let c0 = m.listagens();
+    std::thread::sleep(Duration::from_millis(2000));
+    let ciclos = m.listagens() - c0;
+    assert!(
+        ciclos <= 3,
+        "R19 (spec 4A): {ciclos} ciclos em 2 s sem saida nova; so o ciclo de seguranca devia rodar"
+    );
+    assert_eq!(agente(&srv.socket, "claude")["state"], "idle");
+}

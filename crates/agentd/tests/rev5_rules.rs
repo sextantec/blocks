@@ -303,9 +303,9 @@ fn r06_falso_idle_do_codex_com_spinner_no_titulo_fica_working() {
         amostra.iter().all(|s| s == "working"),
         "R6 (falso idle do Codex): spinner no titulo devia manter working: {amostra:?}"
     );
-    m.paineis(&[Painel::new("%1", "codex")
-        .tag("codex-blocks")
-        .titulo("work-cx1")]);
+    // A tag do agente codex e "codex" (agente_do_kind); o ID do agente e "codex-blocks".
+    let (_, tag, cmd) = agente_do_kind("codex");
+    m.paineis(&[Painel::new("%1", cmd).tag(tag).titulo("work-cx1")]);
     let a = espera_estado(&srv.socket, id, "idle", Duration::from_secs(6));
     assert_eq!(
         a["state"], "idle",
