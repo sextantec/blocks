@@ -894,7 +894,18 @@ fn b03b_pedaco_saltado_aborta() {
 fn b03c_pedaco_maior_que_chunk_max_e_recusado() {
     let (a, _srv) = amb_daemon(Some(true), true);
     let grande = vec![1u8; 600 * 1024];
-    let r = put_raw(&a, A, B, None, &grande);
+    // Um UNICO `blob.put.chunk` de 600 KiB brutos (o helper `put_raw` parte em pedacos de 512 KiB).
+    let mut c = autenticada(&a, A);
+    let b = c.chama(
+        "blob.put.begin",
+        json!({"v": 1, "size": grande.len(), "to": B}),
+    );
+    assert!(!is_err(&b), "begin de 600 KiB: {b}");
+    let up = res(&b)["upload_id"].as_str().unwrap().to_string();
+    let r = c.chama(
+        "blob.put.chunk",
+        json!({"v": 1, "upload_id": up, "n": 0, "data": b64(&grande)}),
+    );
     assert!(
         is_err(&r),
         "pedaco de 600 KiB brutos passa do teto de 512 KiB: {r}"
@@ -1270,12 +1281,14 @@ fn b11b_upload_de_outra_conexao_da_mesma_identidade_e_not_found() {
 #[test]
 fn b11c_upload_ids_nao_sao_previsiveis() {
     let (a, _srv) = amb_daemon(Some(true), true);
-    let mut c = autenticada(&a, A);
-    let u1 = res(&c.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": B})))["upload_id"]
+    // Duas identidades distintas (a mesma identidade so pode ter 1 upload simultaneo: `upload_busy`).
+    let mut ca = autenticada(&a, A);
+    let mut cb = autenticada(&a, B);
+    let u1 = res(&ca.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": B})))["upload_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let u2 = res(&c.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": B})))["upload_id"]
+    let u2 = res(&cb.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": A})))["upload_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1603,23 +1616,15 @@ fn b23a_length_enorme_e_validado() {
 
 #[test]
 fn b24_com_auth_off_os_anexos_nao_ficam_disponiveis() {
-    let a = Amb::novo();
-    fs::create_dir_all(a.state()).unwrap();
-    let cfg = a.p().join("cfg.json");
-    fs::write(&cfg, cfg_json(Some(true), false).to_string()).unwrap();
-    let (_code, pronto) = sobe_sem_esperar(&a, &cfg);
-    // AMBIGUO: a spec diz que o daemon "recusa ligar anexos" com auth off, mas nao diz se recusa subir ou se
-    // responde unauthenticated. Aceita-se qualquer um dos dois, desde que nenhum anexo passe.
-    if pronto {
-        emite_token(&a, A);
-        let mut c = Conexao::abre(&a.socket());
-        let r = c.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": B}));
-        assert_eq!(
-            cod(&r),
-            "unauthenticated",
-            "com auth off, blob.* responde unauthenticated: {r}"
-        );
-    }
+    // Esclarecimento B2: com `auth: off` o daemon SOBE e todo `blob.*` responde `unauthenticated`.
+    let (a, _srv) = amb_daemon(Some(true), false);
+    let mut c = Conexao::abre(&a.socket());
+    let r = c.chama("blob.put.begin", json!({"v": 1, "size": 0, "to": B}));
+    assert_eq!(
+        cod(&r),
+        "unauthenticated",
+        "com auth off, blob.* responde unauthenticated: {r}"
+    );
 }
 
 #[test]
