@@ -18,6 +18,16 @@ Hoje o `chatd stale` detecta `[chat] parado: claude 7 pendente(s), mais antiga 3
 ### Contrato testavel (A; `tmux` FALSO que registra cada chamada)
 - **K1** nada parado: `set-option` com valor vazio; nenhum `display-message`; saida 0. **K2** um parado (`claude`, 7, 329 min): valor exato `claude 7p 329m`; um `display-message -c C -d 10000 -l --` por cliente com a linha exata; saida 6. **K3** segunda execucao no mesmo episodio: `set-option` de novo com o mesmo valor, nenhum `display-message`, saida 0. **K4** dois parados: ordem por nome e ` | `. **K5** texto acima de 200: corta em fronteira e termina em ` +K`. **K6** nomes de cliente invalidos ignorados; 9 clientes = 8 chamadas. **K7** assunto/corpo com `#{`, `#(` e `;` no log nunca aparecem em nenhum argumento (varrer o registro do falso). **K8** `tmux` inexistente: aviso `spawn_failed`, saida inalterada, sink `file:` gravou. **K9** `tmux` sai nao zero: idem `exit_nonzero`. **K10** `tmux` trava: `timeout`, execucao total < 12 s. **K11** `--notify file:X --notify tmux`: ambos agem; 4 sinks, duplicado ou `--tmux-bin` sem o sink: saida 2. **K12** propriedade: o registro do falso so contem `set-option`, `list-clients`, `display-message`. **K13** `--tmux-socket P`: todas as chamadas levam `-S P` antes do subcomando. **K14** `chatd stale` sem `tmux` nao muda nada (regressao S1 a S11 e v1.8).
 
+### Esclarecimentos da Parte A (testes independentes, 2026-10-16)
+1. **Linha do `display-message`** = exatamente a linha de texto fixo que o `stale` imprime para aquele episodio (v1.8 regra 6), inclusive `campainha K vez(es)` quando for o caso.
+2. **Apos `spawn_failed`** o sink `tmux` **para**: nao tenta as chamadas seguintes (so `timeout` tambem pula o resto; `exit_nonzero` de uma chamada nao impede as demais, exceto que `list-clients` falho dispensa os `display-message`).
+3. **Aviso de falha:** uma linha `chatd: aviso: sink tmux: MOTIVO` **por execucao** e por motivo (a primeira falha que parou ou o primeiro `exit_nonzero`), nao por chamada.
+4. **Uma linha de `display-message` por cliente e por aviso novo**; avisos novos diferentes geram linhas diferentes para o mesmo cliente.
+5. **` +K`** conta entradas omitidas, nao caracteres.
+6. **Trava:** limite de 5 s por chamada e 10 s no total; o teste aceita < 12 s.
+7. **S9 da v1.7 e revogado:** `--notify tmux` deixa de sair 2; o teste `s9_notify_tmux_sai_2_e_nao_executa_tmux` foi removido (cobertura em K1 a K14); `s9b` (sink fora da lista = 2) continua.
+8. **`--tmux-bin`/`--tmux-socket` sem o sink `tmux`** saem 2 (K11d/K11e); a prova de que as opcoes existem quando o sink esta ligado e K11a/K13.
+
 ## Parte B (PROPOSTA): portao do `agentd` na campainha tmux (muda o daemon)
 1. **Pre-requisito no `agentd` (rev5.4, aditivo):** `Agente` ganha `pane` (id do painel observado, ex.: `%7`, ou `null`). Backlog do agentd.
 2. **Config** do `chatd` (campo desconhecido segue recusado): `"agentd": {"bin": "agentd", "socket": "/abs"}` e, por destinatario, `"agentd_id"` opcional (padrao: o nome do destinatario). `"bell_tmux_dry_run"` (padrao **true**).

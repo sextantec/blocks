@@ -735,38 +735,7 @@ fn s8c_conteudo_de_linha_corrompida_nao_ecoa() {
     );
 }
 
-// ---------- S9: sink tmux e reservado: saida 2, sem executar nada ----------
-
-#[test]
-fn s9_notify_tmux_sai_2_e_nao_executa_tmux() {
-    let a = Amb::novo();
-    let st = a.state();
-    let mut d = Diario::novo(&st);
-    d.registro("s9-1", A, C, "assunto", "corpo", &ha_min(16));
-    // tmux falso no PATH: se o verificador o executar, cria a marca.
-    let bin = a.p().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    let marca = a.p().join("tmux-foi-chamado");
-    let script = format!("#!/bin/sh\n: > '{}'\n", s(&marca));
-    let falso = escreve(&bin.join("tmux"), &script, 0o755);
-    assert!(falso.exists());
-    let path = bin.display().to_string();
-    let st_s = s(&st).to_string();
-    // Controle: sem o sink tmux o mesmo estado e verificado com saida 6. Sem isso, saida 2 poderia ser so erro de uso.
-    let ctl = roda(&a, &["stale", "--state-dir", st_s.as_str()], &[]);
-    assert_eq!(
-        ctl.code,
-        Some(6),
-        "controle sem --notify tmux deve dar 6: {ctl:?}"
-    );
-    let r = roda(
-        &a,
-        &["stale", "--state-dir", st_s.as_str(), "--notify", "tmux"],
-        &[("PATH", path.as_str())],
-    );
-    assert_eq!(r.code, Some(2), "sink tmux reservado = saida 2: {r:?}");
-    assert!(!marca.exists(), "o verificador executou tmux");
-}
+// ---------- S9 (revogado pela v1.9): o sink `tmux` deixou de ser reservado; a cobertura esta em tests/v19_sink_tmux.rs (K1 a K14) ----------
 
 #[test]
 fn s9b_sink_fora_da_lista_sai_2() {
