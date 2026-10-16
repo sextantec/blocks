@@ -163,3 +163,11 @@ Origem: decisao do Jabbur "Pendencia 1: A" e consulta ao Opus e ao Astra (`docs/
 5. **Papeis (C9):** `config.json` ganha `roles: {"orchestrator": "NOME", "owner": "NOME"}`; sem `roles`, alerta de mensagem cujo destinatario seja o orquestrador nao e emitido a ninguem alem do proprio `chatd obligations`. O alerta nunca vai ao agente travado.
 6. **Janela de duplicata (C12):** a marca de "avisado" e gravada no stamp **antes** do `--notify`; entre as duas, uma execucao concorrente pode repetir o aviso. Limite documentado: no maximo **2** avisos do mesmo episodio, e nunca depois de o stamp refletir o primeiro.
 
+### Esclarecimentos da Parte B (resposta as ambiguidades dos testes independentes, 2026-10-15 noite; fixados pelo Sextante, valem para a implementacao)
+1. **Segundo upload simultaneo da mesma identidade:** `blob.put.begin` => erro `upload_busy` (sem reservar cota).
+2. **`auth: off`:** o daemon **sobe** normalmente e todo `blob.*` responde `unauthenticated` (sem gravar nada); a recusa de "ligar anexos" significa isso, nao recusar a partida.
+3. **Varredura de segredo:** roda a cada pedaco (com janela de 64 bytes de sobreposicao entre pedacos) e na conferencia final; a primeira deteccao responde `secret_suspected` **no pedaco em que ocorreu ou no `put.end`**, aborta a sessao e apaga o temporario. O teste deve aceitar o erro em qualquer desses dois passos.
+4. **Formatos do cliente:** `put --json` => `{"v":1,"blob":ID,"size":N,"expires_at":TS}`; `inbox --count` imprime `pendentes=N aceitas=M` (mesmos rotulos do `status`, sem nomes); `ls` imprime uma linha por blob `ID DONO>DESTINO TAMANHO NOME expires_in=SEGUNDOS` e, com `--json`, um array dos mesmos campos.
+5. **`upload_id`:** `up:` seguido de 32 hex (128 bits aleatorios); qualquer id de outra identidade, conexao ou inexistente => `not_found`.
+6. **32 blobs por dono:** a contagem e regra do daemon e fica coberta por teste de unidade em `src/` (o limite de 30 `put.begin`/min torna o caso inalcancavel na suite de caixa preta em menos de 2 minutos); a suite independente nao a exercita.
+
