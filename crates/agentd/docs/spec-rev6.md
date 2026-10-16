@@ -44,14 +44,14 @@ Seja `E` o estado da fonte estruturada (mais recente, valido), `T` o estado da t
 2. **`E` e `working` ou `blocked`:** publica `E` (de imediato). A tela nao rebaixa por conta propria, exceto a regra 5.
 3. **`T` e `working` ou `blocked` e `E` e `idle`:** publica `T` (a tela liga o nao-ocioso: seguranca) e marca `diverged` se durar mais de `diverge_after_ms` (padrao 5000).
 4. **`E` e `idle` e `T` nao contradiz** (`T` e `idle` ou `unknown`/`unmatched`): publica `idle`. Aqui `unknown` da tela **nao** impede o `idle` (e o caso do Claude 2.1.302: a tela nao casa nada, a estruturada manda). Exige tambem a confirmacao da rev5 sobre o `terminal` (mesmo par `pane_id`/`pane_pid`), mas **nao** as duas leituras de tela: o relato estruturado ja e discreto.
-5. **`screen_override` (o caso do `Esc`):** `E` e `working`, `idade(E) >= override_after_s` (padrao 15), e `T` e `idle` por regra positiva confirmada (as 3 condicoes da regra 5' da rev5) por esse tempo todo: publica `idle` com a marca `screen_override`. Sem regra de tela que case `idle` (`unknown`), **nao ha override**: permanece `working` (falso `working` e seguro; o proximo relato corrige). Em `blocked` nunca ha override.
+5. **`screen_override` (o caso do `Esc`):** `E` e `working`, `idade(E) >= 15 s` (**constante no codigo, `SCREEN_OVERRIDE_S = 15`, nao configuravel**: e uma invariante de seguranca; decisao do Jabbur, 2026-10-16, "Hardcoded"), e `T` e `idle` por regra positiva confirmada (as 3 condicoes da regra 5' da rev5) por esse tempo todo: publica `idle` com a marca `screen_override`. Sem regra de tela que case `idle` (`unknown`), **nao ha override**: permanece `working` (falso `working` e seguro; o proximo relato corrige). Em `blocked` nunca ha override.
 6. **Painel ausente / gone:** igual a rev5 (a fonte `tmux` e a unica que decide presenca); relatos de um painel ausente sao ignorados.
 7. **Eventos:** continuam `state_changed` com `seq` (rev4 regra 4), agora tambem com `source` e `evidence` do estado novo; a entrada e saida de `diverged`, `structured_lost` e `screen_override` geram evento.
 
 ## 7. Configuracao (acrescimos)
 ```json
 {
-  "diverge_after_ms": 5000, "override_after_s": 15, "hooks_silence_s": 600,
+  "diverge_after_ms": 5000, "hooks_silence_s": 600,
   "codex_socket": "/home/USUARIO/.codex/app-server-control/app-server-control.sock",
   "agents": {
     "claude":       {"kind":"claude","sources":[{"type":"tmux","pane":"%0"},{"type":"claude_hooks"}]},
@@ -59,7 +59,7 @@ Seja `E` o estado da fonte estruturada (mais recente, valido), `T` o estado da t
   }
 }
 ```
-Campo desconhecido e chave duplicada continuam recusados. `codex_socket` e opcional (padrao: o do Codex). Sem a fonte estruturada o agente funciona como na rev5.
+Campo desconhecido e chave duplicada continuam recusados, **inclusive `override_after_s`** (o tempo do `screen_override` e constante, 15 s, e nao existe como chave). Limites validos: `diverge_after_ms` de 1000 a 60000; `hooks_silence_s` de 60 a 3600; fora disso a config e recusada. `codex_socket` e opcional (padrao: o do Codex). Sem a fonte estruturada o agente funciona como na rev5.
 
 ## 8. CLI (acrescimos)
 - `agentd report EVENTO` (para hooks): lê `$TMUX_PANE`; ignora o stdin; envia o relato ao socket (`AGENTD_SOCKET`/`--socket`); **sai 0 sempre**, em menos de 1 s, mesmo sem daemon (nao pode atrapalhar o Claude); escreve nada na saida padrao.
@@ -76,7 +76,7 @@ Hooks do Claude em `.claude/settings.local.json` da bancada (comando fixo, sem s
 ## 11. Contrato testavel (testes independentes; `tmux` FALSO como na rev5; servidor WebSocket FALSO que registra os metodos; relatos enviados por `agentd report` com `TMUX_PANE` controlado)
 - **S1** Codex: `idle` -> `active` -> `active+waitingOnApproval` -> `idle` publicam `idle`, `working`, `blocked/permission`, `idle` em menos de 1 s do evento, `source: app_server`. **S2** `waitingOnUserInput` => `blocked/user_input`. **S3** `notLoaded`, `systemError`, tipo desconhecido => `unknown`, nunca `idle`. **S4** lista fechada: o servidor falso so ve `initialize`, `initialized`, `thread/loaded/list`, `thread/read` (com `includeTurns:false`) e caminho `/`; nunca `thread/resume`, `turn/*`, `thread/queue/*`, `/daemon/shutdown`. **S5** queda do socket => `structured_lost`, o agente cai para a rev5 (tela), reconecta com recuo, volta. **S6** `thread_file` ausente/invalido/symlink/gravavel por outros => `structured_lost`, sem travar.
 - **H1** Claude: `UserPromptSubmit` -> `working`; `Stop` -> `idle` (com a tela `unknown`, caso 2.1.302) em menos de 1 s. **H2** `PermissionRequest` => `blocked/permission`; `Elicitation` => `blocked/user_input`. **H3** relato de `pane` nao configurado => descartado e `reports.rejected` sobe; o estado nao muda. **H4** evento fora da lista => descartado. **H5** `agentd report` sai 0 e em menos de 1 s sem daemon, sem escrever na saida padrao e ignorando o stdin (sentinela no stdin nunca aparece em `agent.*`/`status`/eventos). **H6** `SessionEnd` + painel ausente => `gone`.
-- **F1** relato `idle` com a tela mostrando `working` (regra casa): publica `working`, marca `diverged` depois de `diverge_after_ms`. **F2** relato `working` e tela `idle` positiva: continua `working` ate `override_after_s`, entao `idle` com `screen_override`; com a tela `unknown`: continua `working` indefinidamente. **F3** `blocked` nunca sofre override. **F4** relato falso de `idle` repetido nao tira o agente de `working` quando a tela mostra trabalho. **F5** sem estruturada ativa: comportamento identico ao da rev5 (regressao: toda a suite R da rev5 verde). **F6** `unmatched_ratio` sobe quando a tela nao casa e a estruturada esta ativa; `status` mostra, o estado nao muda.
+- **F1** relato `idle` com a tela mostrando `working` (regra casa): publica `working`, marca `diverged` depois de `diverge_after_ms`. **F2** relato `working` e tela `idle` positiva: continua `working` ate 15 s (constante), entao `idle` com `screen_override`; **F2b** a chave `override_after_s` na config e recusada e as chaves com limites (`diverge_after_ms`, `hooks_silence_s`) recusam `0` e valores fora da faixa; com a tela `unknown`: continua `working` indefinidamente. **F3** `blocked` nunca sofre override. **F4** relato falso de `idle` repetido nao tira o agente de `working` quando a tela mostra trabalho. **F5** sem estruturada ativa: comportamento identico ao da rev5 (regressao: toda a suite R da rev5 verde). **F6** `unmatched_ratio` sobe quando a tela nao casa e a estruturada esta ativa; `status` mostra, o estado nao muda.
 - **P1** privacidade: sentinela no stdin do hook, no `activeFlags` inesperado e no nome de evento invalido nunca aparece em saida alguma. **P2** o daemon continua sem escrever no tmux (lista fechada da rev5, regressao R3).
 
 ## 12. Fora desta spec
