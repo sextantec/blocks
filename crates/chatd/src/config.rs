@@ -41,6 +41,8 @@ pub struct Config {
     pub auth_required: bool,
     pub herdr_bin: String,
     pub tmux_bin: String,
+    /// Permite digitar a campainha no tmux; inseguro porque nao verifica se o painel esta ocioso.
+    pub bell_tmux_typing: bool,
     pub bell_poll_ms: u64,
     pub bell_rearm_s: u64,
     pub recipients: BTreeMap<String, Recipient>,
@@ -61,6 +63,7 @@ struct Raw {
     auth: Option<String>,
     herdr_bin: Option<String>,
     tmux_bin: Option<String>,
+    bell_tmux_typing: Option<bool>,
     bell_poll_ms: Option<u64>,
     bell_rearm_s: Option<u64>,
     #[serde(default)]
@@ -168,6 +171,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         auth_required,
         herdr_bin,
         tmux_bin,
+        bell_tmux_typing: raw.bell_tmux_typing.unwrap_or(false),
         bell_poll_ms,
         bell_rearm_s,
         recipients,

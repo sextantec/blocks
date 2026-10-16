@@ -8,6 +8,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 
 use crate::protocol::{self, AckParams, ApiError, Ref, SendParams};
@@ -94,6 +95,19 @@ pub fn msg_json(m: &Msg) -> Value {
 
 pub fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn replay_bell_instant(ts: &str, wall_now: DateTime<Utc>, monotonic_now: Instant) -> Instant {
+    let age = DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .and_then(|event_ts| {
+            wall_now
+                .signed_duration_since(event_ts.with_timezone(&Utc))
+                .to_std()
+                .ok()
+        })
+        .unwrap_or_default();
+    monotonic_now.checked_sub(age).unwrap_or(monotonic_now)
 }
 
 pub(crate) fn sliding_rate_available(
@@ -437,7 +451,9 @@ impl Store {
             }
             "bell_sent" => {
                 let r = str_field(obj, "recipient")?.to_string();
-                self.last_bell_seq.insert(r, seq);
+                self.last_bell_seq.insert(r.clone(), seq);
+                self.outstanding
+                    .insert(r, replay_bell_instant(&ts, Utc::now(), Instant::now()));
             }
             "bell_failed" => {
                 str_field(obj, "recipient")?;

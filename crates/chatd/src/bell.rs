@@ -50,6 +50,10 @@ fn ring(shared: &Shared, name: &str) {
     let Some(target) = target else {
         return;
     };
+    // Desligada por padrao: recuse antes da verificacao que executaria `tmux display-message`.
+    if target.mux == Mux::Tmux && !shared.cfg.bell_tmux_typing {
+        return record_failed(shared, name, "tmux_typing_disabled");
+    }
     if let Some(binding) = &target.binding
         && !binding::verify(
             &shared.cfg,
@@ -122,6 +126,7 @@ fn send_prompt(
             )
             .map(|_| true)
         }
+        Mux::Tmux if !shared.cfg.bell_tmux_typing => Err("tmux_typing_disabled"),
         Mux::Tmux => run_herdr(
             shared.cfg.tmux_bin.as_str(),
             &["send-keys", "-t", pane, "-l", &text],
