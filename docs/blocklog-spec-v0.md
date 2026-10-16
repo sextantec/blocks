@@ -27,7 +27,7 @@ Uma linha UTF-8 terminada em `\n`, objeto JSON, chaves exatas (desconhecida = co
 1. Tomar `flock(LOCK_EX|LOCK_NB)` em `LOCK`; falha = `already_running`.
 2. Ler `log.jsonl` inteiro. Os bytes **depois do ultimo `\n`** sao a **cauda**: **descartados** e o arquivo truncado para o ultimo `\n`, com `sync_all` do arquivo **antes** de aceitar escritas. Isso vale mesmo que a cauda seja um JSON valido sem `\n` (nao terminou de ser gravada). (Mais estrito que o `chatd`, que descarta tambem uma ultima linha **com** `\n` e ilegivel.)
 3. Cada linha terminada em `\n` deve ser um commit valido (secao 3) com `seq` = anterior + 1 e `ts` >= o anterior. **Qualquer linha completa invalida, em qualquer posicao, inclusive a ultima, recusa a partida** (`corrupt`, com o numero da linha); o `blocklog` nunca apaga uma linha completa.
-4. Reconstruir o indice de idempotencia: para cada commit com `req`, `(agent,id)` -> `(seq, h, res, ts)`. Entradas com `ts` mais antigo que `request_retention_days` (padrao 30; faixa 1 a 3650) **antes do instante da abertura** nao entram no indice.
+4. Reconstruir o indice de idempotencia: para cada commit com `req`, `(agent,id)` -> `(seq, h, res, ts)`. **Duas ocorrencias do mesmo `(agent,id)`** (com `h` igual ou diferente): a segunda e valida **somente se** `ts` da segunda >= `ts` da primeira + `request_retention_days` (a primeira ja tinha vencido quando a segunda foi aceita; a segunda passa a ser a vigente); caso contrario e **corrupcao** (`Corrupt`, numero da linha da segunda), porque `commit` nunca grava duas ocorrencias vivas. Ao fim do replay, so entram no indice as entradas com `ts` + `request_retention_days` > o instante da abertura.
 5. Entregar os commits ao chamador (iterador em ordem) para que ele reconstrua a sua projecao. Log vazio = estado inicial valido.
 
 ## 5. Escrita
@@ -74,7 +74,7 @@ pub struct Commit { pub seq: u64, pub ts: String, pub tx: Vec<serde_json::Value>
 pub struct Committed { pub seq: u64, pub replayed: bool, pub res: Option<serde_json::Value> }
 
 #[derive(Debug)] pub enum OpenError { AlreadyRunning, InsecurePermissions(String), Corrupt { line: usize, reason: String }, BadOptions(String), Io(std::io::Error) }
-#[derive(Debug)] pub enum CommitError { Broken, TooLarge, TxTooLarge, EmptyTx, LogFull, RequestConflict, MissingRes, Io(std::io::Error) }
+#[derive(Debug)] pub enum CommitError { Broken, TooLarge, TxTooLarge, EmptyTx, InvalidInput(String), LogFull, RequestConflict, MissingRes, Io(std::io::Error) }
 
 pub struct Log { /* privado */ }
 impl Log {
@@ -86,13 +86,14 @@ impl Log {
 }
 pub fn sha256_hex(data: &[u8]) -> String;       // 64 hex minusculos
 ```
-- Na repeticao idempotente (`req` ja no indice com o mesmo `h`) `commit` devolve `Committed{seq: original, replayed: true, res: gravado}` e **ignora** o `res` recebido; sem escrita. `req` presente e `res` ausente = `CommitError::MissingRes`. `tx` com mais eventos que `Options::tx_max` = `TxTooLarge`; vazio = `EmptyTx`.
+- Na repeticao idempotente (`req` ja no indice com o mesmo `h`) `commit` devolve `Committed{seq: original, replayed: true, res: gravado}` e **ignora** o `res` recebido; sem escrita. `req` presente e `res` ausente = `CommitError::MissingRes`. `tx` com mais eventos que `Options::tx_max` = `TxTooLarge`; vazio = `EmptyTx`. **`InvalidInput(motivo)`** (nada e gravado, sem `broken`): algum elemento de `tx` que nao e objeto JSON; `Req.agent` fora de `[a-z0-9_-]{1,32}`; `Req.id` fora de `[A-Za-z0-9._-]{1,64}`; `Req.h` que nao e 64 hexadecimais minusculos. A validacao roda **antes** de qualquer escrita, na ordem: `Broken`, `EmptyTx`, `TxTooLarge`, `InvalidInput`, `MissingRes`, idempotencia, `TooLarge`, `LogFull`.
 - Faixas de `Options`: `line_max` 4096..=4194304; `tx_max` 1..=64; `request_retention_days` 1..=3650; `log_max_bytes` 1048576..=68719476736. `open` chama `validate` antes de tudo.
 - Cada operacao de `LogFile`/`Storage` que falhar vira `Io(...)` (em `open`) ou `Io(...)` + `Broken` conforme a secao 5 (em `commit`). `FsStorage::lock` e `open_log` mapeiam `EWOULDBLOCK` -> `AlreadyRunning` e o modo/dono/symlink invalido -> `InsecurePermissions`.
 
 ## 9. Contrato testavel (testes independentes; sem rede; falhas por `LogFile`/`Clock` injetados)
 - **Recuperacao:** B1 cauda sem `\n` com JSON parcial descartada e arquivo truncado; B2 cauda sem `\n` com JSON **valido** tambem descartada; B3 linha completa invalida na ultima posicao recusa a partida; B4 linha invalida no meio recusa; B5 `seq` com lacuna, repetido ou retrocedido recusa; B6 `ts` regressivo recusa; B7 chave desconhecida ou `tx` vazio recusa; B8 depois da recuperacao o arquivo termina em `\n` e novo commit recebe `seq` correto.
 - **Escrita:** B9 sucesso grava uma linha e um `sync_data`; B10 `write_all` falho = `broken`, nada aplicado, leitura continua, commit seguinte `broken`; B11 `sync_data` falho idem; B12 escrita curta idem; B13 `ENOSPC` idem; B14 linha acima de `line_max` = `too_large` sem escrever e sem `broken`; B15 `tx` > `tx_max` ou vazio; B16 `log_max_bytes` = `log_full` sem `broken`; B17 `ts` nao regride com relogio regressivo.
+- **Entrada invalida e duplicata (adicionados na rev1.1):** B29 elemento de `tx` que nao e objeto = `InvalidInput`, nada gravado, sem `broken`; B30 `Req` com `agent`, `id` ou `h` fora do formato (casos: maiuscula no agent, id com espaco, `h` com 63 ou 65 caracteres ou maiuscula) = `InvalidInput`; B31 log com duas ocorrencias do mesmo `(agent,id)` a menos de `request_retention_days` uma da outra recusa a partida; B32 duas ocorrencias separadas por mais de `request_retention_days` sao validas e a ultima e a vigente.
 - **Idempotencia:** B18 mesma `(agent,id,h)` devolve `res` original com `replayed:true` e nao grava; B19 mesmo id e `h` diferente = `request_conflict`; B20 a idempotencia sobrevive a reabertura; B21 fora de `request_retention_days` conta como novo; B22 `req` sem `res` e recusado.
 - **Dono e permissoes:** B23 segundo `open` = `already_running`; B24 modo errado/symlink = `insecure_permissions`; B25 arquivos criados 0600 e diretorio com `fsync` apos criar; B26 uid errado recusado (so se rodar como root; senao registrar como nao testado).
 - **Estado reconstruivel:** B27 reabrir e reler os commits devolve a mesma sequencia que foi gravada; B28 SHA-256 contra vetores NIST (implementacao propria, como a do `chatd`, `crates/chatd/src/hash.rs`).
