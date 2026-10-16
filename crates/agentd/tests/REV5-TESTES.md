@@ -19,7 +19,7 @@ G12, G14, G20, G22), por escopo. Nada commitado.
 
 Como rodar (offline, sem tmux real, sem agente real):
 
-    cd /home/mjabbur/Projects/blocks
+    cd RAIZ_DO_WORKSPACE_BLOCKS
     cargo test --offline -p agentd -- harness_
     cargo test --offline -p agentd --no-fail-fast --test rev5_rules --test rev5_source --test rev5_events --test rev5_config_cli
     cargo clippy --offline -p agentd --test rev5_harness --test rev5_rules --test rev5_source --test rev5_events --test rev5_config_cli -- -D warnings
