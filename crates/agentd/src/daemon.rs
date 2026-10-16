@@ -1,16 +1,14 @@
-use crate::config::Config;
+use crate::{config::Config, rules::Rules, tmux};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
-        process::CommandExt,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -40,10 +38,17 @@ fn serve_cli(args: &[String]) -> Result<(), Failure> {
         "uso: agentd serve --config F [--socket P] [--state-dir D]".into(),
     ))?;
     let c = Config::read(Path::new(&cfg)).map_err(|e| (1, e))?;
+    let rules = Rules::load(&c.rules_file).map_err(|e| (1, e))?;
+    if c.agents
+        .values()
+        .any(|a| !rules.kinds.contains_key(&a.kind))
+    {
+        return Err((1, "kind sem regras".into()));
+    }
     let socket = opt(args, "--socket")
         .or_else(|| opt(args, "--state-dir").map(|p| format!("{p}/agentd.sock")))
         .ok_or((2, "socket ou state-dir obrigatorio".into()))?;
-    serve(c, PathBuf::from(socket))
+    serve(c, rules, PathBuf::from(socket))
 }
 
 #[derive(Clone)]
@@ -61,9 +66,13 @@ struct Rec {
     observed_at: Option<u64>,
     last_known: Option<String>,
     cwd: Option<String>,
-    terminal: Option<String>,
+    terminal: Option<(String, u32)>,
+    blocked_reason: Option<String>,
+    rule: Option<String>,
+    input: Option<String>,
+    since: Option<u64>,
     absent: Option<Instant>,
-    idle_key: Option<(String, u64)>,
+    idle_key: Option<(String, u32, u64, String)>,
     idle_first: Option<Instant>,
     idle_n: u64,
 }
@@ -78,15 +87,19 @@ struct Core {
     source_ok: bool,
     source_last: Option<u64>,
     source_error: Option<String>,
+    rules: Rules,
+    event_mode: String,
+    last_output: BTreeMap<String, Instant>,
 }
 impl Core {
-    fn wall() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-    fn changed(&mut self, id: &str, old: (String, Vec<String>, String, Option<String>)) {
+    fn changed(
+        &mut self,
+        id: &str,
+        old: (String, Vec<String>, String, Option<String>, Option<String>),
+    ) {
+        if old.0 != self.agents[id].state {
+            self.agents.get_mut(id).unwrap().since = Some(crate::time::wall_ms());
+        }
         let a = &self.agents[id];
         if old
             == (
@@ -94,12 +107,13 @@ impl Core {
                 a.marks.clone(),
                 a.evidence.clone(),
                 a.source.clone(),
+                a.blocked_reason.clone(),
             )
         {
             return;
         }
         self.seq += 1;
-        let e = json!({"v":1,"seq":self.seq,"epoch":self.epoch,"ts":Self::wall(),"type":"state_changed","id":id,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"previous_state":old.0,"previous_marks":old.1});
+        let e = json!({"v":1,"seq":self.seq,"epoch":self.epoch,"ts":crate::time::wall_ms(),"type":"state_changed","id":id,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"since":a.since,"blocked_reason":a.blocked_reason,"previous_state":old.0,"previous_marks":old.1});
         self.ring.push_back(e.clone());
         while self.ring.len() > self.cfg.ring {
             self.ring.pop_front();
@@ -129,6 +143,7 @@ impl Core {
                     a.marks.clone(),
                     a.evidence.clone(),
                     a.source.clone(),
+                    a.blocked_reason.clone(),
                 )
             };
             let a = self.agents.get_mut(&id).unwrap();
@@ -151,7 +166,7 @@ impl Core {
         let age = a
             .observed
             .map(|t| Instant::now().duration_since(t).as_millis() as u64);
-        json!({"v":1,"id":id,"kind":self.cfg.agents[id].kind,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"last_seen":a.last_seen,"observed_at":a.observed_at,"freshness_ms":age,"last_known":a.last_known,"cwd":a.cwd})
+        json!({"v":1,"id":id,"kind":self.cfg.agents[id].kind,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"last_seen":a.last_seen,"observed_at":a.observed_at,"freshness_ms":age,"last_known":a.last_known,"cwd":a.cwd,"since":a.since,"blocked_reason":a.blocked_reason,"rule":a.rule,"input":a.input})
     }
     fn snapshot(&mut self) {
         self.stale();
@@ -166,7 +181,7 @@ fn mark(a: &mut Rec, m: &str) {
 fn unmark(a: &mut Rec, m: &str) {
     a.marks.retain(|x| x != m)
 }
-fn serve(cfg: Config, socket: PathBuf) -> Result<(), Failure> {
+fn serve(cfg: Config, rules: Rules, socket: PathBuf) -> Result<(), Failure> {
     STOP.store(false, Ordering::Relaxed);
     unsafe {
         libc::signal(
@@ -211,6 +226,10 @@ fn serve(cfg: Config, socket: PathBuf) -> Result<(), Failure> {
                     last_known: None,
                     cwd: None,
                     terminal: None,
+                    blocked_reason: None,
+                    rule: None,
+                    input: None,
+                    since: None,
                     absent: None,
                     idle_key: None,
                     idle_first: None,
@@ -230,10 +249,18 @@ fn serve(cfg: Config, socket: PathBuf) -> Result<(), Failure> {
         source_ok: false,
         source_last: None,
         source_error: Some("source_spawn_failed".into()),
+        rules,
+        event_mode: if cfg.events {
+            "degraded".into()
+        } else {
+            "off".into()
+        },
+        last_output: BTreeMap::new(),
     }));
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     {
         let c = core.clone();
-        thread::spawn(move || poller(c));
+        thread::spawn(move || poller(c, ready_tx));
     }
     {
         let c = core.clone();
@@ -247,6 +274,9 @@ fn serve(cfg: Config, socket: PathBuf) -> Result<(), Failure> {
             }
         });
     }
+    let _ = ready_rx.recv_timeout(Duration::from_millis(
+        cfg.source_timeout_ms.saturating_mul(2).min(5000),
+    ));
     eprintln!("agentd: pronto");
     while !STOP.load(Ordering::Relaxed) {
         match listener.accept() {
@@ -264,350 +294,511 @@ fn serve(cfg: Config, socket: PathBuf) -> Result<(), Failure> {
     Ok(())
 }
 
-#[derive(Clone)]
-struct Info {
-    pane: String,
-    agent: Option<String>,
-    status: String,
-    cwd: Option<String>,
-    terminal: Option<String>,
-    seq: Option<u64>,
-    launch: bool,
-    skipped: bool,
+struct EventClient {
+    child: std::process::Child,
+    _stdin: std::process::ChildStdin,
 }
-struct Snapshot {
-    agents: Vec<Info>,
-    started: Instant,
-    started_wall: u64,
+struct Retry {
+    attempts: u32,
+    after: Instant,
 }
-fn source(cfg: &Config) -> Result<Snapshot, String> {
-    let started = Instant::now();
-    let started_wall = Core::wall();
-    let mut cmd = Command::new(&cfg.herdr_bin);
-    cmd.arg("agent")
-        .arg("list")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().map_err(|_| "source_spawn_failed".to_string())?;
-    let pid = child.id() as i32;
-    let mut out = child.stdout.take().unwrap();
-    let mut err = child.stderr.take().unwrap();
-    let (out_tx, out_rx) = mpsc::channel();
-    let oh = thread::spawn(move || {
-        let mut b = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match out.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if b.len() < 1024 * 1024 + 1 {
-                        let keep = (1024 * 1024 + 1 - b.len()).min(n);
-                        b.extend_from_slice(&chunk[..keep]);
-                    }
-                }
-            }
-        }
-        let _ = out_tx.send(b);
-    });
-    let eh = thread::spawn(move || {
-        let mut b = [0u8; 8192];
-        let mut total = 0usize;
-        loop {
-            match err.read(&mut b) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    total += n;
-                    if total >= 65536 {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    let start = Instant::now();
-    let mut status = None;
-    let mut output = None;
-    let timed_out = loop {
-        if status.is_none()
-            && let Ok(Some(st)) = child.try_wait()
-        {
-            status = Some(st.success());
-        }
-        if output.is_none() {
-            output = out_rx.try_recv().ok();
-        }
-        if status.is_some() && output.is_some() {
-            break false;
-        }
-        if start.elapsed() > Duration::from_millis(cfg.source_timeout_ms) {
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            break true;
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
-    if output.is_none() {
-        output = out_rx.recv_timeout(Duration::from_millis(100)).ok();
-    }
-    let b = output.unwrap_or_default();
-    let _ = oh.join();
-    let _ = eh.join();
-    if timed_out {
-        return Err("source_timeout".into());
-    }
-    if status == Some(false) {
-        return Err("source_exit_nonzero".into());
-    }
-    if b.len() > 1024 * 1024 {
-        return Err("source_too_large".into());
-    }
-    let v: Value = serde_json::from_slice(&b).map_err(|_| "source_bad_json".to_string())?;
-    let arr = v
-        .get("result")
-        .and_then(|x| x.get("agents"))
-        .and_then(Value::as_array)
-        .ok_or("source_bad_json")?;
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for x in arr {
-        let pane = x
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .ok_or("source_bad_json")?
-            .to_owned();
-        if !seen.insert(pane.clone()) {
-            return Err("duplicate_pane".into());
-        }
-        out.push(Info {
-            pane,
-            agent: x.get("agent").and_then(Value::as_str).map(str::to_owned),
-            status: x
-                .get("agent_status")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            cwd: x.get("cwd").and_then(Value::as_str).map(str::to_owned),
-            terminal: x
-                .get("terminal_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            seq: x.get("state_change_seq").and_then(Value::as_u64),
-            launch: x
-                .get("launch_pending")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            skipped: x
-                .get("screen_detection_skipped")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        });
-    }
-    Ok(Snapshot {
-        agents: out,
-        started,
-        started_wall,
-    })
+fn old(a: &Rec) -> (String, Vec<String>, String, Option<String>, Option<String>) {
+    (
+        a.state.clone(),
+        a.marks.clone(),
+        a.evidence.clone(),
+        a.source.clone(),
+        a.blocked_reason.clone(),
+    )
 }
-fn poller(core: Arc<Mutex<Core>>) {
+fn source_failure(c: &mut Core, code: &str) {
+    c.source_ok = false;
+    c.source_error = Some(code.into());
+    let ids: Vec<_> = c.agents.keys().cloned().collect();
+    for id in ids {
+        let before = old(&c.agents[&id]);
+        let a = c.agents.get_mut(&id).unwrap();
+        if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
+            a.last_known = Some(a.state.clone());
+        }
+        a.state = "unknown".into();
+        a.blocked_reason = None;
+        a.rule = None;
+        a.input = None;
+        mark(a, "error");
+        unmark(a, "unmatched");
+        unmark(a, "background");
+        a.idle_n = 0;
+        a.idle_first = None;
+        a.idle_key = None;
+        unmark(a, "idle_unconfirmed");
+        c.changed(&id, before);
+    }
+}
+fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
+    let (events_tx, events_rx) = mpsc::channel::<(String, Option<String>)>();
+    let mut clients = BTreeMap::<String, EventClient>::new();
+    let mut retries = BTreeMap::<String, Retry>::new();
+    let mut configured_panes = HashSet::<String>::new();
+    let mut dirty_panes = HashSet::<String>::new();
+    let mut screen_cache = HashMap::<(String, u32), Vec<crate::rules::TextLine>>::new();
+    let mut dirty_at: Option<Instant> = None;
+    let mut next_safety = Instant::now();
+    let mut last_cycle = Instant::now() - Duration::from_secs(3600);
+    let mut first_cycle = true;
+
     loop {
-        let (cfg, cycle) = {
+        if STOP.load(Ordering::Relaxed) {
+            for (_, mut client) in clients {
+                tmux::kill_group(&mut client.child);
+            }
+            return;
+        }
+        let (cfg, rules) = {
             let c = core.lock().unwrap();
-            (c.cfg.clone(), c.cfg.poll_ms)
+            (c.cfg.clone(), c.rules.clone())
         };
-        let start = Instant::now();
-        let read = source(&cfg);
-        {
-            let mut c = core.lock().unwrap();
-            match read {
-                Err(code) => {
-                    c.source_ok = false;
-                    c.source_error = Some(code);
-                    let ids: Vec<_> = c.agents.keys().cloned().collect();
-                    for id in ids {
-                        let old = {
-                            let a = &c.agents[&id];
-                            (
-                                a.state.clone(),
-                                a.marks.clone(),
-                                a.evidence.clone(),
-                                a.source.clone(),
-                            )
-                        };
-                        {
-                            let a = c.agents.get_mut(&id).unwrap();
-                            if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
-                                a.last_known = Some(a.state.clone());
-                            }
-                            a.state = "unknown".into();
-                            mark(a, "error");
-                            a.idle_n = 0;
-                            a.idle_first = None;
-                            a.idle_key = None;
-                            unmark(a, "idle_unconfirmed");
-                        }
-                        c.changed(&id, old);
+        let now = Instant::now();
+
+        while let Ok((session, line)) = events_rx.try_recv() {
+            match line {
+                None => {
+                    core.lock().unwrap().event_mode = "degraded".into();
+                    if let Some(mut cl) = clients.remove(&session) {
+                        tmux::kill_group(&mut cl.child);
                     }
+                    schedule_retry(&mut retries, &session);
                 }
-                Ok(snapshot) => {
-                    c.source_ok = true;
-                    c.source_last = Some(Core::wall());
-                    c.source_error = None;
-                    let ids: Vec<_> = c.agents.keys().cloned().collect();
-                    let now = Instant::now();
-                    for id in ids {
-                        let ac = c.cfg.agents[&id].clone();
-                        let idle_confirm_polls = c.cfg.idle_confirm_polls;
-                        let idle_confirm_ms = c.cfg.idle_confirm_ms;
-                        let gone_after_s = c.cfg.gone_after_s;
-                        let found = snapshot.agents.iter().find(|i| i.pane == ac.pane).cloned();
-                        let old = {
-                            let a = &c.agents[&id];
-                            (
-                                a.state.clone(),
-                                a.marks.clone(),
-                                a.evidence.clone(),
-                                a.source.clone(),
-                            )
-                        };
-                        let mut source_error = None;
-                        let mut terminal_changed = false;
-                        if let Some(i) = found {
-                            let a = c.agents.get_mut(&id).unwrap();
-                            if i.agent.as_deref() != Some(ac.kind.as_str())
-                                && i.agent.as_deref() != Some(id.as_str())
-                            {
-                                if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
-                                    a.last_known = Some(a.state.clone());
-                                }
-                                a.state = "unknown".into();
-                                mark(a, "error");
-                                a.idle_n = 0;
-                                a.idle_key = None;
-                                a.idle_first = None;
-                                unmark(a, "idle_unconfirmed");
-                                source_error = Some("kind_mismatch".to_string());
-                            } else {
-                                unmark(a, "error");
-                                unmark(a, "stale");
-                                a.last_seen = Some(Core::wall());
-                                a.observed = Some(snapshot.started);
-                                a.observed_at = Some(snapshot.started_wall);
-                                a.evidence = "observed".into();
-                                a.source = Some("herdr".into());
-                                a.cwd = i.cwd.clone();
-                                if a.terminal
-                                    .as_ref()
-                                    .is_some_and(|t| Some(t.as_str()) != i.terminal.as_deref())
-                                {
-                                    if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
-                                        a.last_known = Some(a.state.clone());
-                                    }
-                                    a.state = "unknown".into();
-                                    mark(a, "error");
-                                    terminal_changed = true;
-                                    a.idle_n = 0;
-                                    a.idle_key = None;
-                                    a.idle_first = None;
-                                }
-                                a.terminal = i.terminal.clone();
-                                let mapped = match i.status.as_str() {
-                                    "working" => Some("working"),
-                                    "blocked" => Some("blocked"),
-                                    "idle" | "done" => Some("idle"),
-                                    "unknown" => Some("unknown"),
-                                    _ => {
-                                        if ["idle", "working", "blocked"]
-                                            .contains(&a.state.as_str())
-                                        {
-                                            a.last_known = Some(a.state.clone());
-                                        }
-                                        a.state = "unknown".into();
-                                        mark(a, "error");
-                                        source_error = Some("status_unmapped".to_string());
-                                        None
-                                    }
-                                };
-                                if terminal_changed {
-                                    // A reused terminal needs one subsequent valid snapshot before publication.
-                                } else if i.launch || i.skipped {
-                                    a.state = "unknown".into();
-                                    a.idle_n = 0;
-                                    unmark(a, "idle_unconfirmed");
-                                } else if let Some(st) = mapped {
-                                    if st == "idle" {
-                                        let key = i.terminal.clone().zip(i.seq);
-                                        let same = key.is_some() && a.idle_key == key;
-                                        if !same {
-                                            a.idle_n = 0;
-                                            a.idle_first = Some(now);
-                                            a.idle_key = key.clone();
-                                        }
-                                        a.idle_n += 1;
-                                        mark(a, "idle_unconfirmed");
-                                        if a.idle_n >= idle_confirm_polls
-                                            && key.is_some()
-                                            && a.idle_first.is_some_and(|t| {
-                                                now.duration_since(t).as_millis() as u64
-                                                    >= idle_confirm_ms
-                                            })
-                                        {
-                                            a.state = "idle".into();
-                                            unmark(a, "idle_unconfirmed");
-                                            a.last_known = None;
-                                        }
-                                    } else {
-                                        a.state = st.into();
-                                        a.idle_n = 0;
-                                        a.idle_first = None;
-                                        a.idle_key = None;
-                                        unmark(a, "idle_unconfirmed");
-                                        a.last_known = None;
-                                    }
-                                }
-                                a.absent = None;
-                            }
-                        } else {
-                            let a = c.agents.get_mut(&id).unwrap();
-                            if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
-                                a.last_known = Some(a.state.clone());
-                            }
-                            a.idle_n = 0;
-                            a.idle_first = None;
-                            a.idle_key = None;
-                            unmark(a, "idle_unconfirmed");
-                            mark(a, "error");
-                            if a.absent.is_none() {
-                                a.absent = Some(now)
-                            }
-                            a.state = if now.duration_since(a.absent.unwrap()).as_secs()
-                                >= gone_after_s
-                            {
-                                "gone".into()
-                            } else {
-                                "unknown".into()
-                            };
-                        }
-                        if source_error.is_some() {
-                            c.source_error = source_error;
-                        }
-                        c.changed(&id, old);
+                Some(line) if line == "__long__" || line == "%exit" => {
+                    core.lock().unwrap().event_mode = "degraded".into();
+                    if let Some(mut cl) = clients.remove(&session) {
+                        tmux::kill_group(&mut cl.child);
+                    }
+                    schedule_retry(&mut retries, &session);
+                }
+                Some(line) => {
+                    let mut parts = line.splitn(3, ' ');
+                    if parts.next() == Some("%output")
+                        && let Some(pane) = parts.next().filter(|p| configured_panes.contains(*p))
+                    {
+                        note_output(
+                            &core,
+                            pane,
+                            &mut dirty_panes,
+                            &mut dirty_at,
+                            cfg.event_debounce_ms,
+                        );
                     }
                 }
             }
         }
-        thread::sleep(Duration::from_millis(cycle).saturating_sub(start.elapsed()));
+        for (session, client) in &mut clients {
+            if client.child.try_wait().ok().flatten().is_some() {
+                let session = session.clone();
+                if let Some(mut dead) = clients.remove(&session) {
+                    tmux::kill_group(&mut dead.child);
+                }
+                schedule_retry(&mut retries, &session);
+                break;
+            }
+        }
+
+        let events_enabled = cfg.events;
+        let any_clients = !clients.is_empty();
+        let mode = core.lock().unwrap().event_mode.clone();
+        let poll_due = (!events_enabled || mode != "on")
+            && now.duration_since(last_cycle) >= Duration::from_millis(cfg.poll_ms);
+        let safety_due = events_enabled && now >= next_safety;
+        let debounce_due = dirty_at.is_some_and(|t| now >= t);
+        let idle_due = {
+            let c = core.lock().unwrap();
+            c.agents.values().any(|a| {
+                a.marks.contains(&"idle_unconfirmed".into())
+                    && a.idle_first.is_some_and(|t| {
+                        now.duration_since(t) >= Duration::from_millis(cfg.idle_confirm_ms)
+                    })
+            })
+        };
+        if poll_due || safety_due || debounce_due || idle_due {
+            dirty_at = None;
+            last_cycle = now;
+            if safety_due {
+                next_safety = now + Duration::from_millis(cfg.safety_poll_ms);
+            }
+            let capture_all = !events_enabled || mode != "on" || safety_due;
+            let mut capture_ids = dirty_panes.clone();
+            if !capture_all {
+                let c = core.lock().unwrap();
+                capture_ids.extend(c.agents.values().filter_map(|a| {
+                    if a.marks.contains(&"idle_unconfirmed".into()) {
+                        a.terminal.as_ref().map(|p| p.0.clone())
+                    } else {
+                        None
+                    }
+                }));
+            }
+            match tmux::collect(
+                &cfg,
+                &rules,
+                (!capture_all).then_some(&capture_ids),
+                &screen_cache,
+            ) {
+                Err(code) => {
+                    let mut c = core.lock().unwrap();
+                    source_failure(&mut c, &code);
+                }
+                Ok((snapshot, panes)) => {
+                    let active_pairs: HashSet<(String, u32)> = snapshot
+                        .agents
+                        .values()
+                        .filter_map(|r| r.pane.as_ref().map(|p| (p.id.clone(), p.pid)))
+                        .collect();
+                    screen_cache.retain(|key, _| active_pairs.contains(key));
+                    for read in snapshot.agents.values() {
+                        if let (Some(pane), Some(screen)) = (&read.pane, &read.screen) {
+                            screen_cache.insert((pane.id.clone(), pane.pid), screen.clone());
+                        } else if let Some(pane) = &read.pane {
+                            screen_cache.remove(&(pane.id.clone(), pane.pid));
+                        }
+                    }
+                    dirty_panes.clear();
+                    let current: HashSet<String> = cfg.agents.values().filter_map(|a| match &a.selector { crate::config::Selector::Pane(p)=>Some(p.clone()), _=>None }).chain(
+                        panes.iter().filter(|p| cfg.agents.values().any(|a| matches!(&a.selector,crate::config::Selector::Tag(t) if t==&p.tag))).map(|p|p.id.clone())
+                    ).collect();
+                    configured_panes = current;
+                    {
+                        let mut c = core.lock().unwrap();
+                        c.source_ok = true;
+                        c.source_last = Some(snapshot.started_wall);
+                        c.source_error = None;
+                        let now = Instant::now();
+                        for id in c.cfg.agents.keys().cloned().collect::<Vec<_>>() {
+                            let ac = c.cfg.agents[&id].clone();
+                            let read =
+                                snapshot
+                                    .agents
+                                    .get(&id)
+                                    .cloned()
+                                    .unwrap_or(tmux::AgentRead {
+                                        pane: None,
+                                        screen: None,
+                                        error: Some("source_bad_output".into()),
+                                    });
+                            let before = old(&c.agents[&id]);
+                            let poll_ms = c.cfg.idle_confirm_polls;
+                            let confirm_ms = c.cfg.idle_confirm_ms;
+                            let gone_after_s = c.cfg.gone_after_s;
+                            let event_live = c.cfg.events
+                                && !clients.is_empty()
+                                && read
+                                    .pane
+                                    .as_ref()
+                                    .is_some_and(|p| clients.contains_key(&p.session));
+                            let mut per_agent_error = read.error.clone();
+                            if let Some(code) = per_agent_error.as_deref() {
+                                apply_error(c.agents.get_mut(&id).unwrap(), code);
+                            } else if let Some(pane) = read.pane {
+                                if let Some(screen) = read.screen {
+                                    let decision = c.rules.evaluate(&ac.kind, &screen, &pane.title);
+                                    apply_valid(
+                                        &mut c,
+                                        &id,
+                                        pane,
+                                        decision,
+                                        snapshot.started,
+                                        snapshot.started_wall,
+                                        poll_ms,
+                                        confirm_ms,
+                                        event_live,
+                                        now,
+                                    );
+                                } else {
+                                    per_agent_error = Some("capture_failed".into());
+                                    apply_error(c.agents.get_mut(&id).unwrap(), "capture_failed");
+                                }
+                            } else {
+                                apply_absent(c.agents.get_mut(&id).unwrap(), now, gone_after_s);
+                            }
+                            if let Some(code) = per_agent_error {
+                                c.source_error = Some(code);
+                            }
+                            c.changed(&id, before);
+                        }
+                    }
+                    if events_enabled {
+                        let sessions: Vec<String> = panes
+                            .iter()
+                            .filter(|p| configured_panes.contains(&p.id))
+                            .map(|p| p.session.clone())
+                            .collect::<HashSet<_>>()
+                            .into_iter()
+                            .filter(|s| !clients.contains_key(s))
+                            .take(8usize.saturating_sub(clients.len()))
+                            .collect();
+                        for session in sessions {
+                            if retries.get(&session).is_some_and(|r| now < r.after) {
+                                continue;
+                            }
+                            match tmux::spawn_event(&cfg, &session) {
+                                Ok((child, input, output, stderr)) => {
+                                    tmux::event_reader(session.clone(), output, events_tx.clone());
+                                    tmux::discard_stderr(stderr);
+                                    clients.insert(
+                                        session.clone(),
+                                        EventClient {
+                                            child,
+                                            _stdin: input,
+                                        },
+                                    );
+                                }
+                                Err(_) => schedule_retry(&mut retries, &session),
+                            }
+                        }
+                        let wanted: HashSet<String> = panes
+                            .iter()
+                            .filter(|p| configured_panes.contains(&p.id))
+                            .map(|p| p.session.clone())
+                            .collect();
+                        let mode = if wanted.is_empty() {
+                            "off"
+                        } else if wanted.iter().all(|s| clients.contains_key(s)) {
+                            "on"
+                        } else {
+                            "degraded"
+                        };
+                        core.lock().unwrap().event_mode = mode.into();
+                    } else {
+                        core.lock().unwrap().event_mode = "off".into();
+                    }
+                }
+            }
+            if first_cycle {
+                let _ = ready.send(());
+                first_cycle = false;
+            }
+            continue;
+        }
+        let wait = if events_enabled && any_clients {
+            let d = dirty_at
+                .map(|t| t.saturating_duration_since(now))
+                .unwrap_or(
+                    Duration::from_millis(cfg.safety_poll_ms)
+                        .min(next_safety.saturating_duration_since(now)),
+                );
+            d.min(Duration::from_millis(50))
+                .max(Duration::from_millis(1))
+        } else {
+            Duration::from_millis(20).min(Duration::from_millis(cfg.poll_ms))
+        };
+        match events_rx.recv_timeout(wait) {
+            Ok((session, line)) => match line {
+                None => {
+                    core.lock().unwrap().event_mode = "degraded".into();
+                    if let Some(mut cl) = clients.remove(&session) {
+                        tmux::kill_group(&mut cl.child);
+                    }
+                    schedule_retry(&mut retries, &session);
+                }
+                Some(ref s) if s == "__long__" || s == "%exit" => {
+                    core.lock().unwrap().event_mode = "degraded".into();
+                    if let Some(mut cl) = clients.remove(&session) {
+                        tmux::kill_group(&mut cl.child);
+                    }
+                    schedule_retry(&mut retries, &session);
+                }
+                Some(line) => {
+                    let mut parts = line.splitn(3, ' ');
+                    if parts.next() == Some("%output")
+                        && let Some(pane) = parts.next().filter(|p| configured_panes.contains(*p))
+                    {
+                        note_output(
+                            &core,
+                            pane,
+                            &mut dirty_panes,
+                            &mut dirty_at,
+                            cfg.event_debounce_ms,
+                        );
+                    }
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+fn schedule_retry(retries: &mut BTreeMap<String, Retry>, session: &str) {
+    let entry = retries.entry(session.into()).or_insert(Retry {
+        attempts: 0,
+        after: Instant::now(),
+    });
+    let secs = 1u64
+        .checked_shl(entry.attempts.min(5))
+        .unwrap_or(30)
+        .min(30);
+    entry.attempts = entry.attempts.saturating_add(1);
+    entry.after = Instant::now() + Duration::from_secs(secs);
+}
+fn note_output(
+    core: &Arc<Mutex<Core>>,
+    pane: &str,
+    dirty_panes: &mut HashSet<String>,
+    dirty_at: &mut Option<Instant>,
+    debounce_ms: u64,
+) {
+    let now = Instant::now();
+    dirty_panes.insert(pane.to_string());
+    let mut c = core.lock().unwrap();
+    c.last_output.insert(pane.to_string(), now);
+    for a in c.agents.values_mut() {
+        if a.terminal.as_ref().is_some_and(|p| p.0 == pane)
+            && (a.state == "idle" || a.marks.contains(&"idle_unconfirmed".into()))
+        {
+            a.idle_key = None;
+            a.idle_first = None;
+            a.idle_n = 0;
+            if a.state == "idle" {
+                mark(a, "idle_unconfirmed");
+            }
+        }
+    }
+    if dirty_at.is_none() {
+        *dirty_at = Some(now + Duration::from_millis(debounce_ms));
+    }
+}
+fn apply_error(a: &mut Rec, _code: &str) {
+    if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
+        a.last_known = Some(a.state.clone());
+    }
+    a.state = "unknown".into();
+    a.blocked_reason = None;
+    a.rule = None;
+    a.input = None;
+    mark(a, "error");
+    a.idle_n = 0;
+    a.idle_key = None;
+    a.idle_first = None;
+    unmark(a, "idle_unconfirmed");
+}
+fn apply_absent(a: &mut Rec, now: Instant, gone_after_s: u64) {
+    if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
+        a.last_known = Some(a.state.clone());
+    }
+    a.idle_n = 0;
+    a.idle_key = None;
+    a.idle_first = None;
+    unmark(a, "idle_unconfirmed");
+    mark(a, "error");
+    if a.absent.is_none() {
+        a.absent = Some(now);
+    }
+    a.state = if now.duration_since(a.absent.unwrap()).as_secs() >= gone_after_s {
+        "gone"
+    } else {
+        "unknown"
+    }
+    .into();
+    a.blocked_reason = None;
+    a.rule = None;
+    a.input = None;
+}
+#[allow(clippy::too_many_arguments)]
+fn apply_valid(
+    c: &mut Core,
+    id: &str,
+    pane: tmux::Pane,
+    d: crate::rules::Decision,
+    observed: Instant,
+    observed_wall: u64,
+    polls: u64,
+    confirm_ms: u64,
+    event_live: bool,
+    now: Instant,
+) {
+    let a = c.agents.get_mut(id).unwrap();
+    let pair = (pane.id.clone(), pane.pid);
+    let reused = a.terminal.as_ref().is_some_and(|p| p != &pair);
+    unmark(a, "error");
+    unmark(a, "stale");
+    a.last_seen = Some(crate::time::wall_ms());
+    a.observed = Some(observed);
+    a.observed_at = Some(observed_wall);
+    a.evidence = "observed".into();
+    a.source = Some("tmux".into());
+    a.cwd = None;
+    a.absent = None;
+    if reused {
+        if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
+            a.last_known = Some(a.state.clone());
+        }
+        a.terminal = Some(pair);
+        a.state = "unknown".into();
+        mark(a, "error");
+        a.blocked_reason = None;
+        a.rule = None;
+        a.input = None;
+        a.idle_n = 0;
+        a.idle_key = None;
+        a.idle_first = None;
+        unmark(a, "unmatched");
+        unmark(a, "background");
+        unmark(a, "idle_unconfirmed");
+        return;
+    }
+    a.terminal = Some(pair.clone());
+    let marks = d.marks.clone();
+    if d.state == "idle" {
+        let key = (
+            pane.id.clone(),
+            pane.pid,
+            if event_live { 0 } else { pane.window_activity },
+            d.rule.clone().unwrap_or_default(),
+        );
+        if a.idle_key.as_ref() != Some(&key) {
+            a.idle_key = Some(key.clone());
+            a.idle_first = Some(now);
+            a.idle_n = 0;
+        }
+        a.idle_n = a.idle_n.saturating_add(1);
+        let quiet = event_live
+            && a.idle_first
+                .is_some_and(|first| c.last_output.get(&pane.id).is_none_or(|t| *t <= first));
+        let confirm = a.idle_n >= polls
+            && a.idle_first
+                .is_some_and(|first| now.duration_since(first).as_millis() as u64 >= confirm_ms)
+            && (if event_live {
+                quiet
+            } else {
+                a.idle_key
+                    .as_ref()
+                    .is_some_and(|k| k.2 == pane.window_activity)
+            });
+        a.marks = marks;
+        if confirm {
+            a.state = "idle".into();
+            a.blocked_reason = None;
+            a.rule = d.rule;
+            a.input = d.input;
+            a.last_known = None;
+            unmark(a, "idle_unconfirmed");
+        } else {
+            if a.state == "unknown" || a.state == "gone" {
+                a.state = "unknown".into();
+            }
+            mark(a, "idle_unconfirmed");
+            a.rule = d.rule;
+            a.input = if a.state == "idle" { d.input } else { None };
+        }
+    } else {
+        a.state = d.state;
+        a.blocked_reason = d.reason;
+        a.rule = d.rule;
+        a.input = None;
+        a.marks = marks;
+        a.last_known = None;
+        a.idle_n = 0;
+        a.idle_key = None;
+        a.idle_first = None;
+        unmark(a, "idle_unconfirmed");
     }
 }
 fn reply(id: Value, result: Result<Value, (String, Value)>) -> Value {
@@ -666,7 +857,7 @@ fn dispatch(
                 Err(e)
             } else if p
                 .get("kind")
-                .is_some_and(|x| !matches!(x.as_str(), Some("claude" | "codex")))
+                .is_some_and(|x| !matches!(x.as_str(), Some("claude" | "codex" | "pi")))
             {
                 Err(err("invalid_envelope"))
             } else {
@@ -688,9 +879,9 @@ fn dispatch(
                 Err(e)
             } else {
                 c.snapshot();
-                let agents:serde_json::Map<String,Value>=c.agents.iter().map(|(id,a)|(id.clone(),json!({"state":a.state,"marks":a.marks,"source":a.source,"last_seen":a.last_seen}))).collect();
+                let agents:serde_json::Map<String,Value>=c.agents.iter().map(|(id,a)|(id.clone(),json!({"state":a.state,"marks":a.marks,"source":a.source,"last_seen":a.last_seen,"since":a.since,"blocked_reason":a.blocked_reason}))).collect();
                 Ok(
-                    json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"herdr":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error}}}),
+                    json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"tmux":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error,"events":c.event_mode}}}),
                 )
             }
         }
@@ -866,6 +1057,9 @@ fn socket_for(args: &[String]) -> Option<String> {
 fn cli(args: &[String]) -> Result<(), Failure> {
     let cmd = args.first().map(String::as_str).unwrap_or("");
     let json_mode = args.iter().any(|x| x == "--json");
+    if cmd == "rules" {
+        return rules_check_cli(args, json_mode);
+    }
     if !["get", "list", "watch", "health", "status"].contains(&cmd) {
         return Err((2, "uso: agentd get|list|watch|health|status".into()));
     }
@@ -928,8 +1122,8 @@ fn cli(args: &[String]) -> Result<(), Failure> {
         );
     }
     let mut data = r["result"].clone();
-    let healthy = cmd != "health" || data["sources"]["herdr"]["ok"] == true;
-    if cmd == "get" {
+    let healthy = cmd != "health" || data["sources"]["tmux"]["ok"] == true;
+    if cmd == "get" && !json_mode {
         data = data["agent"].clone()
     }
     if cmd == "health" {
@@ -938,7 +1132,7 @@ fn cli(args: &[String]) -> Result<(), Failure> {
                 json_mode,
                 false,
                 "source_error",
-                "fonte herdr falhou",
+                "fonte tmux falhou",
                 data,
                 1,
             );
@@ -984,6 +1178,41 @@ fn cli(args: &[String]) -> Result<(), Failure> {
         )
     }
     Ok(())
+}
+
+fn rules_check_cli(args: &[String], json_mode: bool) -> Result<(), Failure> {
+    const USAGE: &str = "uso: agentd rules check --rules ARQ --fixtures DIR [--json]";
+    if args.get(1).map(String::as_str) != Some("check") {
+        return Err((2, USAGE.into()));
+    }
+    let (Some(rules_path), Some(fixtures_path)) = (opt(args, "--rules"), opt(args, "--fixtures"))
+    else {
+        return Err((2, USAGE.into()));
+    };
+    let rules = Rules::load(Path::new(&rules_path)).map_err(|_| (1, "rules invalidas".into()))?;
+    match rules.check(Path::new(&fixtures_path)) {
+        Ok(()) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({"schema_version":1,"ok":true,"code":"ok","message":"ok","data":{"checked":true}})
+                );
+            } else {
+                println!("rules: ok");
+            }
+            Ok(())
+        }
+        Err(failures) => {
+            let message = failures.join("; ");
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({"schema_version":1,"ok":false,"code":"rules_check_failed","message":message,"data":null})
+                );
+            }
+            Err((1, message))
+        }
+    }
 }
 fn output(
     _json_mode: bool,
