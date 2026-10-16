@@ -21,3 +21,18 @@ Fonte lido: `ref/codex` (clone raso da tag `rust-v0.163.0` de `github.com/openai
 
 ## Encaixe no chatd (proposta, ainda sem codigo)
 Canal opt-in `codex-queue` (ao lado de arquivo e barra do tmux): vinculo explicito destinatario -> UUID/nome da sessao; `codex queue --thread X --message "<texto fixo da v1.1>"` por `argv`, sem shell, com timeout e saida limitada; falha fechada; **nunca fallback para teclado**; timeout apos aceitar = resultado incerto (nao reenviar de imediato); registro de tentativa no log; testes automaticos com executavel falso. Substitui a campainha por digitacao para o Codex.
+
+---
+## Experimento na sessao real de teste (2026-10-16 15:30, sessao Luna aberta pelo Jabbur em `Projects/tmp`, thread `01a145f9-...`, ligada ao daemon compartilhado 0.163.0)
+Ferramentas: `docs/experimentos-codex/ws_codex.py` (cliente WebSocket minimo, stdlib, so o caminho `/`; **nunca** `/daemon/shutdown`) e `ensaio_fila.py`. O estado da thread vem do protocolo (`thread/read` -> `status`: `{"type":"idle"}` ou `{"type":"active","activeFlags":[...]}`, flags `waitingOnApproval` e `waitingOnUserInput`), sem ler tela. `thread/loaded/list` achou a thread pelo `cwd`.
+
+| caso | resultado medido |
+| --- | --- |
+| ocioso | `codex queue` voltou em **0,2 s** (rc 0, id do item); a thread ficou `active` em **0,2 s** (nao esperou o vigia de 10 s); turno completo em ~3 s; a mensagem chegou como **mensagem de usuario normal** e a resposta foi a pedida |
+| ocupado (turno rodando `sleep 15`) | a 2a mensagem foi aceita (rc 0) e **esperou**: o turno A terminou inteiro (comando + `A-ok`) e so entao a B rodou, em turno proprio (`B-ok`); nada interrompido nem misturado |
+| por nome exato (`--thread "Testar canal codex queue"`) | resolveu para a mesma thread e funcionou |
+| nome inexistente | `Error: No active session found matching '...'` (sem cair em teclado) |
+| aprovacao aberta | **nao reproduzido**: esta sessao nao chegou a pedir aprovacao (o `curl` falhou no sandbox e o agente respondeu `negado`). Coberto pelo codigo: aprovacao pendente e parte de um turno ativo e `start_if_idle` recusa com turno ativo (`turn_input.rs:519`), o mesmo mecanismo do caso ocupado |
+| rascunho no compositor da TUI | **pendente** (precisa de alguem digitando um rascunho sem Enter no painel durante o teste) |
+
+Correcao de metodo: `thread/queue/list` exige a capacidade `experimentalApi` no `initialize` (`capabilities.experimentalApi = true`); sem ela devolve erro -32600, e a primeira rodada leu isso como "fila vazia" por engano. As conclusoes de ordem e tempo vem dos turnos (`thread/read` com `includeTurns`), nao da lista da fila.
