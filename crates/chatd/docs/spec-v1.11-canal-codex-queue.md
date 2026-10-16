@@ -1,6 +1,6 @@
 # chatd v1.11: canal `codex-queue` (acordar um agente Codex sem digitar)
 
-**Estado: PROPOSTA (spec).** Escrita pelo Sextante em 2026-10-16 a pedido do Jabbur ("Siga com o spec do codex-queue"). **A implementacao exige uma nova excecao ao congelamento do daemon**, que o Jabbur ainda nao deu (a excecao de 2026-10-16 cobriu so a v1.10). Evidencias: `docs/codex-queue-analise-2026-10-16.md` (fonte do Codex 0.163.0 e experimentos medidos) e `docs/pesquisa-web-entrada-externa-2026-10-16.md`.
+**Estado: APROVADA PARA IMPLEMENTAR.** Escrita pelo Sextante em 2026-10-16 a pedido do Jabbur ("Siga com o spec do codex-queue"). **Excecao ao congelamento do daemon AUTORIZADA pelo Jabbur em 2026-10-16 ("Excecao aberta", conversa do Claude Code), restrita a esta spec; nada mais do daemon muda.** Registro de autorizacao tambem em `docs/pendencias-jabbur.md` da bancada (P-87). Evidencias: `docs/codex-queue-analise-2026-10-16.md` (fonte do Codex 0.163.0 e experimentos medidos) e `docs/pesquisa-web-entrada-externa-2026-10-16.md`.
 
 ## Problema (exemplo)
 O `codex-blocks` termina um turno e fica ocioso. O Sextante manda um PEDIDO pelo `chatd`. Hoje a unica forma de acordar o Codex e a campainha: digitar `[chat] 1 pendente(s). Rode: chatd inbox --take` no painel. No herdr isso confere `idle` antes; no tmux a v1.10 **desligou** a digitacao porque ela nao ve dialogo de aprovacao nem rascunho. Sem canal, o Codex so le o PEDIDO quando alguem digita no painel.
