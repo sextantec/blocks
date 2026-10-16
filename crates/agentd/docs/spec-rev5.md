@@ -247,3 +247,16 @@ Pasta `crates/agentd/rules/fixtures/{claude,codex,pi}/`. Cada fixture e um par `
 | Leitura do herdr e do Luvus | sem regra casando = `idle`; empate de prioridade; carencia; texto plano da grade | secoes 2, 6 |
 | Medicao do modo de controle (2026-10-16 tarde) | `-r` quebra o `send-keys` de outros processos; `-r` nao protege `kill-pane`; latencia ~0,17 s com debounce 150 ms; ocioso silencioso em Codex e Pi; `Try "..."` do Claude troca a cada 8 s; nenhum canal OSC 9;4 | secao 4A |
 | Laboratorio tmux (rodadas 1 e B) | hooks nao cobrem Esc; titulo cobre o falso idle do Codex; dialogo de plano sem `Esc to cancel`; sugestao fantasma e placeholder dim; subagente em segundo plano; `window_activity` constante em ocioso | secoes 1, 5, 6, Anexo A |
+
+## 15. Esclarecimentos dos testes independentes (rev5.2, 2026-10-16 tarde)
+O escritor dos testes (Haiku 5.5, sem ver o codigo) levantou 10 ambiguidades; esta e a resposta, aditiva e sem mudar o que ja estava escrito. Em empate, vale este texto.
+1. **`--json` de `get`/`list`:** `data` repete o resultado do protocolo sem o `v`: `get` => `{"agent": Agente, "epoch", "head_seq"}`; `list` => `{"agents": [Agente...], "epoch", "head_seq"}`. Cada linha de `watch --json` continua trazendo o `Evento` em `data`.
+2. **`status.sources.tmux.events`:** `"on"` com o cliente de eventos vivo em todas as sessoes com painel configurado, `"degraded"` se algum caiu (ou nao subiu), `"off"` com `events: false`. Sem painel configurado: `"off"`.
+3. **Saida acima de 1 MiB do `list-panes`:** `source_too_large` (o mesmo codigo da captura acima de 256 KiB); a leitura inteira falha.
+4. **`tmux_bin` ausente da configuracao:** vale o padrao `"tmux"` (procurado no `PATH`); nao e recusa. `tmux_bin` presente e vazio ou nao string: recusa (saida 1).
+5. **Fixtures:** `serve` confere so que a lista `fixtures` de cada regra nao e vazia e **nao abre** os arquivos de fixture. `agentd rules check` abre cada fixture: arquivo inexistente ou ilegivel conta como falha (saida 1, com o nome da fixture).
+6. **Separador do `-F`:** o byte TAB literal (0x09) no argumento, nove campos.
+7. **`-S SOCKET`:** vem **antes** do subcomando (`TMUX -S SOCKET list-panes ...`, `TMUX -S SOCKET capture-pane ...`, `TMUX -S SOCKET -C attach ...`).
+8. **Quietude com eventos:** com o cliente de eventos vivo na sessao do painel, a quietude e so o tempo desde o ultimo `%output` **daquele painel** (ou desde a partida do cliente); `window_activity` nao entra. Sem cliente (degradado, `events: false`), vale a regra 5' com `window_activity` da rev5.
+9. **`gone_after_s`:** o limite e inclusivo no relogio monotonico do daemon e medido em ciclos; os testes aceitam o atraso de ate um `poll_ms` e nao medem o limite exato.
+10. **Prontidao:** continua valendo a rev4 (secao 13, item 6): uma linha `agentd: pronto` em stderr quando o socket aceita conexao.
