@@ -59,3 +59,32 @@ Resultado da rodada final: 5 passam (K11d, K11e, K14a, K14b, K14c), 16 falham. O
 - Limites de bytes de saida (64 KiB): nao afirmado; nenhum teste gera saida desse tamanho.
 - A regra "sem `tmux` no PATH quando nao ha `--notify tmux`" (K14a/K14b) e verificada colocando um falso no PATH;
   o teste prova so que nenhuma chamada chegou a ele.
+
+## Limites (rodada de mutacao)
+
+Arquivo: `tests/v19_sink_limites.rs` (L1 a L7). Mesmo modelo do `v19_sink_tmux.rs` (tmux falso em Python 3 `-I`,
+caixa preta, HOME e XDG temporarios). Cada teste tem controle positivo antes do limite. Resultado: 7 passam.
+Os helpers foram copiados; `v19_sink_tmux.rs` nao foi alterado. A linha "Limites de bytes de saida" acima
+ficou para tras: a saida de 64 KiB agora e coberta por L3.
+
+| Id | O que prova | Resultado |
+|---|---|---|
+| L1 | a primeira chamada (set-option) trava 30 s: `stale` termina em menos de 8 s, aviso `timeout`, saida 6, so `set-option` foi chamado (pula o resto) | passa |
+| L2 | cada chamada dorme 4 s (5 chamadas = 20 s sem limite): termina em menos de 13 s, aviso `timeout`, saida 6 | passa |
+| L3 | `list-clients` com 132 000 bytes: aviso `bad_output`, nenhum `display-message`, saida igual ao controle (6); controle com uma linha recebe `display-message` | passa |
+| L4 | texto de exatamente 200 caracteres (7 entradas de 26): sem ` +K`, igual ao texto inteiro; 201 (6 entradas de 31): 5 entradas + ` +1`, com 170 caracteres | passa |
+| L5 | primeira execucao chama `list-clients`; segunda, no mesmo episodio, chama so `set-option` | passa |
+| L6 | `display-message` sai 1 nos tres clientes: uma unica linha `exit_nonzero`, as tres chamadas tentadas, saida igual ao controle | passa |
+| L7 | cliente de 64 caracteres recebe `display-message`; de 65 e ignorado; controle com nome normal | passa |
+
+Ambiguidades (marcadas no arquivo):
+
+1. **L4, corte guloso**: o teste exige que o corte mantenha o maximo de entradas que cabem (5 de 6 no caso de 201).
+   A spec diz "corta em fronteira de entrada", sem dizer se o corte e guloso. Se a regra for outra, o valor
+   esperado do 201 muda.
+2. **L4, ` +K` e o limite**: o teste exige que o valor final, com ` +K`, tenha no maximo 200 caracteres (como a
+   spec diz para o caso de 201). Nao ha teste para o caso em que o sufixo sozinho estoura o limite.
+3. **L1 e L2, tempo**: os limites (5 s e 10 s) sao testados com folga (8 s e 13 s). Um limite mais apertado ou mais
+   frouxo que 1 a 3 s nao e pego por estes testes.
+4. **L6, demais chamadas**: o esclarecimento 2 manda que `exit_nonzero` de uma chamada nao impeca as demais; L6
+   exige as tres `display-message` tentadas. Se a leitura for outra, o teste muda.
