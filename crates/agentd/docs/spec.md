@@ -1,4 +1,4 @@
-# agentd v1: observador conservador do estado dos agentes (contrato testavel) | RASCUNHO rev3 (revisoes do codex-blocks, Opus e Sol 6.1 incorporadas, 2026-10-15)
+# agentd v1: observador conservador do estado dos agentes (contrato testavel) | RASCUNHO rev4 (rev3 + secao 14: `since` e `blocked_reason`, 2026-10-15 noite)
 
 Origem (decisoes do Jabbur, 2026-10-15): "creio que devemos pensar em um outro daemon que faca o que o herdr e luvus fazem para ler o estado dos agentes"; **daemon** (nao CLI), codigo em `crates/agentd` do `blocks`, implementacao pelo `codex-blocks`; filosofia unix (uma tarefa, uma ferramenta). Estudo-base: repositorio privado `agentd` (`docs/estudo-2026-10-15.md`). Os testes falam com o **binario** e com o **protocolo no socket**, nunca com a API interna.
 
@@ -137,5 +137,23 @@ Fonte app-server do Codex; fontes de hook do Claude e interrupcao pela transcric
 4. **Estado inicial** de um agente nunca lido: `state: unknown`, `evidence: none`, `source: null`, `marks: [error]` (a primeira leitura valida preenche).
 5. **Anel retido:** os `ring` ultimos eventos; `oldest = head_seq - ring + 1` quando o anel esta cheio.
 6. **Partida:** o daemon imprime em stderr uma linha `agentd: pronto` quando o socket aceita conexao.
-7. **(rev4, decisao do Jabbur, 21):** `blocked_reason` (classe `permission|user_input|unknown`) e `since` entram em `Agente` e nos eventos; ainda **nao** implementados na v1 (nucleo).
+7. **(rev4, decisao do Jabbur, 21):** `blocked_reason` (classe `permission|user_input|unknown`) e `since` entram em `Agente` e nos eventos: contrato na **secao 14**; ainda **nao** implementados no nucleo v1 (`53f8f04`).
 
+## 14. rev4: `since` e `blocked_reason` (decisao do Jabbur, 2026-10-15 noite; contrato aditivo, `v` continua 1)
+**Problema (exemplo):** o orquestrador ve `blocked` no `codex-blocks` e nao sabe se e ha 40 segundos ou ha 6 horas, nem se espera uma permissao do Jabbur ou uma pergunta. Sem isso, "parado" e "esperando humano" parecem iguais.
+
+**Regras**
+1. **`since`** (em `Agente`, em todo `Evento` e em `status.agents[id]`): milissegundos Unix (inteiro, hora de parede, so para exibir, derivado do relogio monotonico no instante da resposta, como `last_seen`) do **instante em que o `state` publicado mudou pela ultima vez**, qualquer transicao (inclusive para `unknown` e `gone`, e a confirmacao de `idle`: vale o instante da confirmacao, nao o da primeira leitura `idle`). **Mudanca so de `marks` nao altera `since`.** `null` enquanto o estado inicial nunca mudou. A idade nunca e enviada: o cliente calcula com seu relogio.
+2. **`blocked_reason`** (mesmos tres lugares): **classe enumerada** `permission | user_input | unknown`, **nunca texto** do comando, da tela ou do titulo. Presente (nao nulo) **somente quando `state` e `blocked`**; em qualquer outro estado e `null`.
+3. **Fonte `herdr` (a unica da v1):** o `agent_status` do herdr nao traz classe, entao todo `blocked` observado sai com `blocked_reason: "unknown"`. As classes `permission` e `user_input` so podem vir de uma fonte `declared` (Anexo), que **nao existe na v1**; o contrato fica fixado agora para nao quebrar clientes depois. Nenhum texto de tela e lido para inferir a classe (secao 9 inalterada).
+4. **Compatibilidade:** campos novos sao aditivos nas **respostas** e nos eventos; `params` continua recusando campo desconhecido. Testes que comparam o conjunto exato de chaves de `Agente`, `Evento` ou `status.agents[id]` passam a esperar `since` e `blocked_reason`; quem corrige e o autor desses testes (regra 8 do AGENTS.md).
+5. **Persistencia:** nenhuma (como o anel); apos reinicio `since` volta a `null` ate a primeira transicao.
+
+**Contrato testavel (rev4)**
+- **G23** `since` e `null` antes de qualquer mudanca de estado; apos `unknown -> working` e igual ao instante da transicao (tolerancia de +-1 ciclo) e igual no `Evento` correspondente.
+- **G24** mudanca so de `marks` (`error` entra e sai, `stale`, `idle_unconfirmed`) **nao** altera `since`; `working -> blocked -> working` altera a cada transicao e e crescente.
+- **G25** `idle` so confirmado: `since` de `idle` e o instante da confirmacao, nao o da primeira leitura.
+- **G26** `blocked` vindo do herdr falso: `blocked_reason == "unknown"`; em `working`, `idle`, `unknown`, `gone`: `null`.
+- **G27** nenhum campo novo contem texto do `terminal_title`, do cwd ou da tela (herdr falso com titulo e tela com marcador unico: o marcador nunca aparece em `get`, `list`, `watch`, `status`, logs).
+- **G28** `agent.get`, `agent.list`, `events.resume` e `status` trazem os dois campos; os campos antigos seguem com os mesmos nomes e tipos (regressao dos 83 testes atuais, exceto os de conjunto exato de chaves).
+- **G29** `since` em `status.agents[id]` e igual ao de `agent.get` no mesmo `head_seq`.
