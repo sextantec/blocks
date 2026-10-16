@@ -1,6 +1,6 @@
 use crate::{
-    config::{AgentConfig, Config, Selector, valid_pane},
-    rules::{Rules, TextLine, parse_screen},
+    config::{Config, valid_pane},
+    rules::{TextLine, parse_screen},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -14,7 +14,7 @@ use std::{
 
 const LIST_LIMIT: usize = 1024 * 1024;
 const CAPTURE_LIMIT: usize = 256 * 1024;
-const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_current_command}\t#{session_id}\t#{@agentd}\t#{pane_title}";
+const FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_current_command}\t#{session_id}\t#{@agentd}\t#{s|[^a-zA-Z0-9._/-]|_|:pane_current_path}\t#{pane_title}";
 
 #[derive(Clone, Debug)]
 pub struct Pane {
@@ -25,6 +25,7 @@ pub struct Pane {
     pub command: String,
     pub session: String,
     pub tag: String,
+    pub cwd: String,
     pub title: String,
 }
 #[derive(Clone, Debug)]
@@ -39,12 +40,7 @@ pub struct Snapshot {
     pub agents: std::collections::HashMap<String, AgentRead>,
 }
 
-pub fn collect(
-    cfg: &Config,
-    rules: &Rules,
-    capture_ids: Option<&HashSet<String>>,
-    cache: &HashMap<(String, u32), Vec<TextLine>>,
-) -> Result<(Snapshot, Vec<Pane>), String> {
+pub fn list(cfg: &Config) -> Result<(Instant, u64, Vec<Pane>), String> {
     let started = Instant::now();
     let started_wall = crate::time::wall_ms();
     let mut args = prefix(cfg);
@@ -53,47 +49,19 @@ pub fn collect(
     if !output.success {
         return Err("source_exit_nonzero".into());
     }
-    let panes = parse_list(&output.stdout)?;
+    Ok((started, started_wall, parse_list(&output.stdout)?))
+}
+
+pub fn capture(
+    cfg: &Config,
+    targets: &HashMap<String, Pane>,
+    capture_ids: Option<&HashSet<String>>,
+    cache: &HashMap<(String, u32), Vec<TextLine>>,
+    started: Instant,
+    started_wall: u64,
+) -> Result<Snapshot, String> {
     let mut agents = std::collections::HashMap::new();
-    for (id, ac) in &cfg.agents {
-        let matches = select(&panes, ac);
-        if matches.len() > 1 {
-            agents.insert(
-                id.clone(),
-                AgentRead {
-                    pane: None,
-                    screen: None,
-                    error: Some("pane_ambiguous".into()),
-                },
-            );
-            continue;
-        }
-        let Some(pane) = matches.first().map(|p| (*p).clone()) else {
-            agents.insert(
-                id.clone(),
-                AgentRead {
-                    pane: None,
-                    screen: None,
-                    error: None,
-                },
-            );
-            continue;
-        };
-        let command_ok = rules
-            .kinds
-            .get(&ac.kind)
-            .is_some_and(|k| k.commands.contains(&pane.command));
-        if pane.dead || !command_ok {
-            agents.insert(
-                id.clone(),
-                AgentRead {
-                    pane: None,
-                    screen: None,
-                    error: None,
-                },
-            );
-            continue;
-        }
+    for (id, pane) in targets {
         let cache_key = (pane.id.clone(), pane.pid);
         if capture_ids.is_some_and(|ids| !ids.contains(&pane.id))
             && let Some(screen) = cache.get(&cache_key)
@@ -101,7 +69,7 @@ pub fn collect(
             agents.insert(
                 id.clone(),
                 AgentRead {
-                    pane: Some(pane),
+                    pane: Some(pane.clone()),
                     screen: Some(screen.clone()),
                     error: None,
                 },
@@ -122,7 +90,7 @@ pub fn collect(
                 agents.insert(
                     id.clone(),
                     AgentRead {
-                        pane: Some(pane),
+                        pane: Some(pane.clone()),
                         screen: Some(parse_screen(&c.stdout)),
                         error: None,
                     },
@@ -132,7 +100,7 @@ pub fn collect(
                 agents.insert(
                     id.clone(),
                     AgentRead {
-                        pane: Some(pane),
+                        pane: Some(pane.clone()),
                         screen: None,
                         error: Some("capture_failed".into()),
                     },
@@ -142,7 +110,7 @@ pub fn collect(
                 agents.insert(
                     id.clone(),
                     AgentRead {
-                        pane: Some(pane),
+                        pane: Some(pane.clone()),
                         screen: None,
                         error: Some(code),
                     },
@@ -150,14 +118,11 @@ pub fn collect(
             }
         }
     }
-    Ok((
-        Snapshot {
-            started,
-            started_wall,
-            agents,
-        },
-        panes,
-    ))
+    Ok(Snapshot {
+        started,
+        started_wall,
+        agents,
+    })
 }
 fn prefix(cfg: &Config) -> Vec<String> {
     cfg.tmux_socket
@@ -165,19 +130,13 @@ fn prefix(cfg: &Config) -> Vec<String> {
         .map(|s| vec!["-S".into(), s.clone()])
         .unwrap_or_default()
 }
-fn select<'a>(panes: &'a [Pane], cfg: &AgentConfig) -> Vec<&'a Pane> {
-    match &cfg.selector {
-        Selector::Pane(id) => panes.iter().filter(|p| &p.id == id).collect(),
-        Selector::Tag(tag) => panes.iter().filter(|p| &p.tag == tag).collect(),
-    }
-}
 pub fn parse_list(raw: &[u8]) -> Result<Vec<Pane>, String> {
     let text = std::str::from_utf8(raw).map_err(|_| "source_bad_output".to_string())?;
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in text.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
+        if cols.len() < 10 || cols[8].is_empty() {
             return Err("source_bad_output".into());
         }
         let id = cols[0];
@@ -203,7 +162,8 @@ pub fn parse_list(raw: &[u8]) -> Result<Vec<Pane>, String> {
             command: cols[5].into(),
             session: session.into(),
             tag: cols[7].into(),
-            title: cols[8..].join("\t"),
+            cwd: cols[8].into(),
+            title: cols[9..].join("\t"),
         });
     }
     Ok(out)

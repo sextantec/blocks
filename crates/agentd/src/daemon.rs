@@ -1,4 +1,8 @@
-use crate::{config::Config, rules::Rules, tmux};
+use crate::{
+    config::{Config, Selector},
+    rules::Rules,
+    tmux,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -57,6 +61,11 @@ struct Sub {
     closed: Arc<AtomicBool>,
 }
 struct Rec {
+    kind: String,
+    origin: String,
+    dynamic: bool,
+    identity: Option<(String, u32)>,
+    gone_since: Option<Instant>,
     state: String,
     marks: Vec<String>,
     evidence: String,
@@ -90,6 +99,8 @@ struct Core {
     rules: Rules,
     event_mode: String,
     last_output: BTreeMap<String, Instant>,
+    discover_found: usize,
+    discover_ignored: usize,
 }
 impl Core {
     fn changed(
@@ -113,7 +124,7 @@ impl Core {
             return;
         }
         self.seq += 1;
-        let e = json!({"v":1,"seq":self.seq,"epoch":self.epoch,"ts":crate::time::wall_ms(),"type":"state_changed","id":id,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"since":a.since,"blocked_reason":a.blocked_reason,"previous_state":old.0,"previous_marks":old.1});
+        let e = json!({"v":1,"seq":self.seq,"epoch":self.epoch,"ts":crate::time::wall_ms(),"type":"state_changed","id":id,"origin":a.origin,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"since":a.since,"blocked_reason":a.blocked_reason,"previous_state":old.0,"previous_marks":old.1});
         self.ring.push_back(e.clone());
         while self.ring.len() > self.cfg.ring {
             self.ring.pop_front();
@@ -166,7 +177,7 @@ impl Core {
         let age = a
             .observed
             .map(|t| Instant::now().duration_since(t).as_millis() as u64);
-        json!({"v":1,"id":id,"kind":self.cfg.agents[id].kind,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"last_seen":a.last_seen,"observed_at":a.observed_at,"freshness_ms":age,"last_known":a.last_known,"cwd":a.cwd,"since":a.since,"blocked_reason":a.blocked_reason,"rule":a.rule,"input":a.input})
+        json!({"v":1,"id":id,"kind":a.kind,"origin":a.origin,"state":a.state,"marks":a.marks,"evidence":a.evidence,"source":a.source,"last_seen":a.last_seen,"observed_at":a.observed_at,"freshness_ms":age,"last_known":a.last_known,"cwd":a.cwd,"since":a.since,"blocked_reason":a.blocked_reason,"rule":a.rule,"input":a.input})
     }
     fn snapshot(&mut self) {
         self.stale();
@@ -216,6 +227,11 @@ fn serve(cfg: Config, rules: Rules, socket: PathBuf) -> Result<(), Failure> {
             (
                 id.clone(),
                 Rec {
+                    kind: cfg.agents[id].kind.clone(),
+                    origin: "configured".into(),
+                    dynamic: false,
+                    identity: None,
+                    gone_since: None,
                     state: "unknown".into(),
                     marks: vec!["error".into()],
                     evidence: "none".into(),
@@ -256,6 +272,8 @@ fn serve(cfg: Config, rules: Rules, socket: PathBuf) -> Result<(), Failure> {
             "off".into()
         },
         last_output: BTreeMap::new(),
+        discover_found: 0,
+        discover_ignored: 0,
     }));
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     {
@@ -335,6 +353,256 @@ fn source_failure(c: &mut Core, code: &str) {
         c.changed(&id, before);
     }
 }
+
+fn fresh_rec(kind: &str, origin: &str, dynamic: bool, identity: Option<(String, u32)>) -> Rec {
+    Rec {
+        kind: kind.into(),
+        origin: origin.into(),
+        dynamic,
+        identity,
+        gone_since: None,
+        state: "unknown".into(),
+        marks: vec!["error".into()],
+        evidence: "none".into(),
+        source: None,
+        last_seen: None,
+        observed: None,
+        observed_at: None,
+        last_known: None,
+        cwd: None,
+        terminal: None,
+        blocked_reason: None,
+        rule: None,
+        input: None,
+        since: None,
+        absent: None,
+        idle_key: None,
+        idle_first: None,
+        idle_n: 0,
+    }
+}
+
+fn selector_matches(selector: &Selector, p: &tmux::Pane) -> bool {
+    match selector {
+        Selector::Pane(id) => &p.id == id,
+        Selector::Tag(tag) => &p.tag == tag,
+        Selector::Cwd(cwd) => &p.cwd == cwd,
+    }
+}
+
+fn pane_number(p: &tmux::Pane) -> u64 {
+    p.id.strip_prefix('%')
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn valid_mark(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+fn generated_id(kind: &str, cwd: &str) -> String {
+    let last = cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
+    let mut base = String::new();
+    let mut dash = false;
+    for ch in last.chars().flat_map(char::to_lowercase) {
+        let ch = if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' {
+            ch
+        } else {
+            '-'
+        };
+        if ch == '-' {
+            if !dash {
+                base.push(ch);
+            }
+            dash = true;
+        } else {
+            base.push(ch);
+            dash = false;
+        }
+    }
+    let base = base.trim_matches(['-', '_', '.']);
+    let prefix = if base.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}-")
+    };
+    let room = 32usize.saturating_sub(prefix.len());
+    format!("{}{}", prefix, &base[..base.len().min(room)])
+}
+
+fn unique_id(base: &str, kind: &str, discovered: bool, used: &HashSet<String>) -> String {
+    if !used.contains(base) {
+        return base.into();
+    }
+    for n in 2u64.. {
+        let suffix = format!("-{n}");
+        let prefix = if discovered && base == kind {
+            kind.to_string()
+        } else if discovered {
+            format!("{kind}-")
+        } else {
+            base.to_string()
+        };
+        let body = if discovered {
+            base.strip_prefix(&prefix).unwrap_or("")
+        } else {
+            ""
+        };
+        let room = 32usize.saturating_sub(prefix.len() + suffix.len());
+        let candidate = format!("{}{}{}", prefix, &body[..body.len().min(room)], suffix);
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Resolve configured and dynamic identities before any pane is captured.
+fn plan_agents(
+    c: &mut Core,
+    panes: &[tmux::Pane],
+) -> (
+    HashMap<String, tmux::AgentRead>,
+    HashMap<String, tmux::Pane>,
+    HashSet<String>,
+) {
+    let mut reads = HashMap::new();
+    let mut targets = HashMap::new();
+    let mut active = HashSet::new();
+    let mut linked = HashSet::new();
+    let mut configured_panes = HashSet::new();
+    for (id, ac) in &c.cfg.agents {
+        let matches: Vec<_> = panes
+            .iter()
+            .filter(|p| selector_matches(&ac.selector, p))
+            .collect();
+        for p in &matches {
+            linked.insert(p.id.clone());
+            configured_panes.insert(p.id.clone());
+        }
+        if matches.len() > 1 {
+            reads.insert(
+                id.clone(),
+                tmux::AgentRead {
+                    pane: None,
+                    screen: None,
+                    error: Some("pane_ambiguous".into()),
+                },
+            );
+            continue;
+        }
+        if let Some(p) = matches.first().filter(|p| {
+            !p.dead
+                && c.rules
+                    .kinds
+                    .get(&ac.kind)
+                    .is_some_and(|k| k.commands.contains(&p.command))
+        }) {
+            targets.insert(id.clone(), (*p).clone());
+            active.insert(id.clone());
+        }
+    }
+
+    let mut candidates: Vec<(u8, tmux::Pane, String, String)> = Vec::new();
+    if c.cfg.discover {
+        for p in panes.iter().filter(|p| !p.dead && !linked.contains(&p.id)) {
+            let mark = if valid_mark(&p.tag) && !c.cfg.agents.contains_key(&p.tag) {
+                Some(p.tag.as_str())
+            } else {
+                None
+            };
+            if mark == Some("off") {
+                continue;
+            }
+            let kinds: Vec<_> = c
+                .rules
+                .kinds
+                .iter()
+                .filter(|(_, r)| r.commands.contains(&p.command))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if kinds.len() != 1 {
+                continue;
+            }
+            let kind = kinds[0].to_string();
+            let identity = (p.id.clone(), p.pid);
+            let old = c
+                .agents
+                .iter()
+                .find(|(_, a)| a.dynamic && a.identity.as_ref() == Some(&identity));
+            let origin = if let Some((_, a)) = old {
+                a.origin.clone()
+            } else if mark.is_some() {
+                "mark".into()
+            } else {
+                "discovered".into()
+            };
+            let priority = match origin.as_str() {
+                "mark" => 1,
+                _ => 2,
+            };
+            candidates.push((priority, p.clone(), kind, origin));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| pane_number(&a.1).cmp(&pane_number(&b.1)))
+    });
+    let mut ignored = 0usize;
+    let mut found = 0usize;
+    for (_, p, kind, origin) in candidates {
+        let identity = (p.id.clone(), p.pid);
+        let known = c
+            .agents
+            .iter()
+            .find(|(_, a)| a.dynamic && a.identity.as_ref() == Some(&identity))
+            .map(|(id, _)| id.clone());
+        let id = if let Some(id) = known {
+            id
+        } else {
+            if c.agents.len() >= 32 {
+                ignored += 1;
+                continue;
+            }
+            let desired = if origin == "mark" {
+                p.tag.clone()
+            } else {
+                generated_id(&kind, &p.cwd)
+            };
+            let used: HashSet<String> = c.agents.keys().cloned().collect();
+            let id = unique_id(&desired, &kind, origin == "discovered", &used);
+            c.agents.insert(
+                id.clone(),
+                fresh_rec(&kind, &origin, true, Some(identity.clone())),
+            );
+            id
+        };
+        if c.agents.len() > 32 && !active.contains(&id) {
+            ignored += 1;
+            continue;
+        }
+        targets.insert(id.clone(), p.clone());
+        active.insert(id.clone());
+        configured_panes.insert(p.id.clone());
+        if c.agents[&id].origin == "discovered" {
+            found += 1;
+        }
+    }
+    for id in c.agents.keys() {
+        reads.entry(id.clone()).or_insert(tmux::AgentRead {
+            pane: None,
+            screen: None,
+            error: None,
+        });
+    }
+    c.discover_found = found;
+    c.discover_ignored = ignored;
+    (reads, targets, configured_panes)
+}
+
 fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
     let (events_tx, events_rx) = mpsc::channel::<(String, Option<String>)>();
     let mut clients = BTreeMap::<String, EventClient>::new();
@@ -346,6 +614,7 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
     let mut next_safety = Instant::now();
     let mut last_cycle = Instant::now() - Duration::from_secs(3600);
     let mut first_cycle = true;
+    let mut ready_cycles = 0u8;
 
     loop {
         if STOP.load(Ordering::Relaxed) {
@@ -354,9 +623,9 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
             }
             return;
         }
-        let (cfg, rules) = {
+        let cfg = {
             let c = core.lock().unwrap();
-            (c.cfg.clone(), c.rules.clone())
+            c.cfg.clone()
         };
         let now = Instant::now();
 
@@ -437,17 +706,36 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                     }
                 }));
             }
-            match tmux::collect(
-                &cfg,
-                &rules,
-                (!capture_all).then_some(&capture_ids),
-                &screen_cache,
-            ) {
+            match tmux::list(&cfg) {
                 Err(code) => {
                     let mut c = core.lock().unwrap();
                     source_failure(&mut c, &code);
                 }
-                Ok((snapshot, panes)) => {
+                Ok((started, started_wall, panes)) => {
+                    let (mut reads, targets, current) = {
+                        let mut c = core.lock().unwrap();
+                        let (reads, targets, current) = plan_agents(&mut c, &panes);
+                        (reads, targets, current)
+                    };
+                    let captured = tmux::capture(
+                        &cfg,
+                        &targets,
+                        (!capture_all).then_some(&capture_ids),
+                        &screen_cache,
+                        started,
+                        started_wall,
+                    );
+                    let snapshot = match captured {
+                        Ok(s) => {
+                            reads.extend(s.agents);
+                            tmux::Snapshot { agents: reads, ..s }
+                        }
+                        Err(code) => {
+                            let mut c = core.lock().unwrap();
+                            source_failure(&mut c, &code);
+                            continue;
+                        }
+                    };
                     let active_pairs: HashSet<(String, u32)> = snapshot
                         .agents
                         .values()
@@ -462,9 +750,6 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                         }
                     }
                     dirty_panes.clear();
-                    let current: HashSet<String> = cfg.agents.values().filter_map(|a| match &a.selector { crate::config::Selector::Pane(p)=>Some(p.clone()), _=>None }).chain(
-                        panes.iter().filter(|p| cfg.agents.values().any(|a| matches!(&a.selector,crate::config::Selector::Tag(t) if t==&p.tag))).map(|p|p.id.clone())
-                    ).collect();
                     configured_panes = current;
                     {
                         let mut c = core.lock().unwrap();
@@ -472,8 +757,9 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                         c.source_last = Some(snapshot.started_wall);
                         c.source_error = None;
                         let now = Instant::now();
-                        for id in c.cfg.agents.keys().cloned().collect::<Vec<_>>() {
-                            let ac = c.cfg.agents[&id].clone();
+                        let all_ids = c.agents.keys().cloned().collect::<Vec<_>>();
+                        for id in all_ids {
+                            let kind = c.agents[&id].kind.clone();
                             let read =
                                 snapshot
                                     .agents
@@ -499,7 +785,7 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                                 apply_error(c.agents.get_mut(&id).unwrap(), code);
                             } else if let Some(pane) = read.pane {
                                 if let Some(screen) = read.screen {
-                                    let decision = c.rules.evaluate(&ac.kind, &screen, &pane.title);
+                                    let decision = c.rules.evaluate(&kind, &screen, &pane.title);
                                     apply_valid(
                                         &mut c,
                                         &id,
@@ -524,13 +810,33 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                             }
                             c.changed(&id, before);
                         }
+                        let forget = c.cfg.discover_forget_s;
+                        let forgotten: Vec<String> = c
+                            .agents
+                            .iter()
+                            .filter_map(|(id, a)| {
+                                (a.dynamic
+                                    && a.state == "gone"
+                                    && a.gone_since
+                                        .is_some_and(|t| now.duration_since(t).as_secs() >= forget))
+                                .then_some(id.clone())
+                            })
+                            .collect();
+                        for id in forgotten {
+                            c.agents.remove(&id);
+                        }
                     }
                     if events_enabled {
-                        let sessions: Vec<String> = panes
+                        let mut sessions: Vec<String> = panes
                             .iter()
-                            .filter(|p| configured_panes.contains(&p.id))
+                            .filter(|p| configured_panes.contains(&p.id) && !p.dead)
                             .map(|p| p.session.clone())
-                            .collect::<HashSet<_>>()
+                            .collect();
+                        sessions.sort_by_key(|s| {
+                            s.trim_start_matches('$').parse::<u64>().unwrap_or(u64::MAX)
+                        });
+                        sessions.dedup();
+                        let sessions: Vec<String> = sessions
                             .into_iter()
                             .filter(|s| !clients.contains_key(s))
                             .take(8usize.saturating_sub(clients.len()))
@@ -556,7 +862,7 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                         }
                         let wanted: HashSet<String> = panes
                             .iter()
-                            .filter(|p| configured_panes.contains(&p.id))
+                            .filter(|p| configured_panes.contains(&p.id) && !p.dead)
                             .map(|p| p.session.clone())
                             .collect();
                         let mode = if wanted.is_empty() {
@@ -573,8 +879,11 @@ fn poller(core: Arc<Mutex<Core>>, ready: mpsc::SyncSender<()>) {
                 }
             }
             if first_cycle {
-                let _ = ready.send(());
-                first_cycle = false;
+                ready_cycles = ready_cycles.saturating_add(1);
+                if ready_cycles >= 2 {
+                    let _ = ready.send(());
+                    first_cycle = false;
+                }
             }
             continue;
         }
@@ -697,6 +1006,9 @@ fn apply_absent(a: &mut Rec, now: Instant, gone_after_s: u64) {
         "unknown"
     }
     .into();
+    if a.state == "gone" && a.gone_since.is_none() {
+        a.gone_since = Some(now);
+    }
     a.blocked_reason = None;
     a.rule = None;
     a.input = None;
@@ -726,6 +1038,7 @@ fn apply_valid(
     a.source = Some("tmux".into());
     a.cwd = None;
     a.absent = None;
+    a.gone_since = None;
     if reused {
         if ["idle", "working", "blocked"].contains(&a.state.as_str()) {
             a.last_known = Some(a.state.clone());
@@ -867,7 +1180,7 @@ fn dispatch(
                     .keys()
                     .filter(|id| {
                         p.get("kind")
-                            .is_none_or(|k| k.as_str() == Some(c.cfg.agents[*id].kind.as_str()))
+                            .is_none_or(|k| k.as_str() == Some(c.agents[*id].kind.as_str()))
                     })
                     .map(|id| c.agent_json(id))
                     .collect();
@@ -879,9 +1192,9 @@ fn dispatch(
                 Err(e)
             } else {
                 c.snapshot();
-                let agents:serde_json::Map<String,Value>=c.agents.iter().map(|(id,a)|(id.clone(),json!({"state":a.state,"marks":a.marks,"source":a.source,"last_seen":a.last_seen,"since":a.since,"blocked_reason":a.blocked_reason}))).collect();
+                let agents:serde_json::Map<String,Value>=c.agents.iter().map(|(id,a)|(id.clone(),json!({"state":a.state,"origin":a.origin,"marks":a.marks,"source":a.source,"last_seen":a.last_seen,"since":a.since,"blocked_reason":a.blocked_reason}))).collect();
                 Ok(
-                    json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"tmux":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error,"events":c.event_mode}}}),
+                    json!({"v":1,"epoch":c.epoch,"head_seq":c.seq,"uptime_s":c.start.elapsed().as_secs(),"agents":agents,"sources":{"tmux":{"ok":c.source_ok,"last_ok_at":c.source_last,"last_error":c.source_error,"events":c.event_mode,"discover":{"on":c.cfg.discover,"found":c.discover_found,"ignored":c.discover_ignored}}}}),
                 )
             }
         }
@@ -1169,12 +1482,13 @@ fn cli(args: &[String]) -> Result<(), Failure> {
                 .collect::<String>()
         };
         println!(
-            "{} {} {} {} idade={}s",
+            "{} {} {} {} idade={}s origin={}",
             esc(&a["id"]),
             state,
             esc(&a["evidence"]),
             esc(&a["source"]),
-            age
+            age,
+            esc(&a["origin"])
         )
     }
     Ok(())

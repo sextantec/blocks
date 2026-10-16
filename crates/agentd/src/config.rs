@@ -19,6 +19,8 @@ pub struct Config {
     pub source_timeout_ms: u64,
     pub stale_after_ms: u64,
     pub gone_after_s: u64,
+    pub discover: bool,
+    pub discover_forget_s: u64,
     pub idle_confirm_polls: u64,
     pub idle_confirm_ms: u64,
     pub ring: usize,
@@ -47,6 +49,7 @@ pub struct AgentConfig {
 pub enum Selector {
     Pane(String),
     Tag(String),
+    Cwd(String),
 }
 
 #[derive(Debug)]
@@ -136,6 +139,8 @@ impl Config {
             "idle_confirm_ms",
             "ring",
             "agents",
+            "discover",
+            "discover_forget_s",
         ];
         if o.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err("campo desconhecido na config".into());
@@ -180,6 +185,11 @@ impl Config {
         let source_timeout_ms = n("source_timeout_ms", 3000)?;
         let stale_after_ms = n("stale_after_ms", 30000)?;
         let gone_after_s = n("gone_after_s", 120)?;
+        let discover = b("discover", false)?;
+        let discover_forget_s = n("discover_forget_s", 3600)?;
+        if !(60..=86400).contains(&discover_forget_s) {
+            return Err("discover_forget_s invalido".into());
+        }
         let idle_confirm_polls = n("idle_confirm_polls", 2)?;
         let idle_confirm_ms = n("idle_confirm_ms", 2500)?;
         let ring = n("ring", 4096)? as usize;
@@ -194,7 +204,7 @@ impl Config {
             idle_confirm_ms,
             ring,
         })?;
-        let agents = parse_agents(o.get("agents").ok_or("agents invalido")?)?;
+        let agents = parse_agents(o.get("agents").ok_or("agents invalido")?, discover)?;
         Ok(Self {
             tmux_bin,
             tmux_socket,
@@ -206,6 +216,8 @@ impl Config {
             source_timeout_ms,
             stale_after_ms,
             gone_after_s,
+            discover,
+            discover_forget_s,
             idle_confirm_polls,
             idle_confirm_ms,
             ring,
@@ -231,9 +243,9 @@ fn validate_limits(l: &Limits) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_agents(value: &Value) -> Result<BTreeMap<String, AgentConfig>, String> {
+fn parse_agents(value: &Value, discover: bool) -> Result<BTreeMap<String, AgentConfig>, String> {
     let ag = value.as_object().ok_or("agents invalido")?;
-    if ag.is_empty() || ag.len() > 32 {
+    if (!discover && ag.is_empty()) || ag.len() > 32 {
         return Err("quantidade de agents invalida".into());
     }
     let mut agents = BTreeMap::new();
@@ -257,6 +269,9 @@ fn parse_agent(id: &str, value: &Value) -> Result<(AgentConfig, String), String>
     {
         return Err("id invalido".into());
     }
+    if id == "off" {
+        return Err("id invalido".into());
+    }
     let a = value.as_object().ok_or("agent invalido")?;
     if a.keys().any(|k| !["kind", "sources"].contains(&k.as_str())) {
         return Err("campo desconhecido em agent".into());
@@ -275,20 +290,24 @@ fn parse_agent(id: &str, value: &Value) -> Result<(AgentConfig, String), String>
     if source.get("type").and_then(Value::as_str) != Some("tmux") {
         return Err("source invalida".into());
     }
-    let selector = match (source.get("pane"), source.get("tag")) {
-        (Some(Value::String(p)), None) if valid_pane(p) => Selector::Pane(p.clone()),
-        (None, Some(Value::String(t))) if valid_tag(t) => Selector::Tag(t.clone()),
+    let selector = match (source.get("pane"), source.get("tag"), source.get("cwd")) {
+        (Some(Value::String(p)), None, None) if valid_pane(p) => Selector::Pane(p.clone()),
+        (None, Some(Value::String(t)), None) if valid_tag(t) && t != "off" => {
+            Selector::Tag(t.clone())
+        }
+        (None, None, Some(Value::String(cwd))) if valid_cwd(cwd) => Selector::Cwd(cwd.clone()),
         _ => return Err("seletor tmux invalido".into()),
     };
     if source
         .keys()
-        .any(|k| !["type", "pane", "tag"].contains(&k.as_str()))
+        .any(|k| !["type", "pane", "tag", "cwd"].contains(&k.as_str()))
     {
         return Err("campo desconhecido em source".into());
     }
     let key = match &selector {
         Selector::Pane(pane) => format!("pane:{pane}"),
         Selector::Tag(tag) => format!("tag:{tag}"),
+        Selector::Cwd(cwd) => format!("cwd:{cwd}"),
     };
     Ok((
         AgentConfig {
@@ -297,6 +316,17 @@ fn parse_agent(id: &str, value: &Value) -> Result<(AgentConfig, String), String>
         },
         key,
     ))
+}
+
+fn valid_cwd(cwd: &str) -> bool {
+    if !cwd.starts_with('/')
+        || !cwd
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+    {
+        return false;
+    }
+    !cwd.split('/').any(|part| part == "." || part == "..")
 }
 
 pub(crate) fn valid_pane(p: &str) -> bool {
