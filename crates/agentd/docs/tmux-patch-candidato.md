@@ -4,7 +4,15 @@ Estado: **registrado, nao adotado** (decisao do Jabbur, 2026-10-16: "Siga com o 
 
 ## O que o patch faz (3 arquivos, ~30 linhas, nenhum protocolo ou comando novo)
 
-Arquivo: [`patches/tmux-3.7c-pane-signals.patch`](patches/tmux-3.7c-pane-signals.patch), sobre a tag `3.7c` (commit `e476c1230b958df0cb12977517d24b3dc931375b`). Aplica limpo (`patch -p1`, verificado em copia). **Compilado e testado em 2026-10-16** (apos o Jabbur instalar `autoconf` e `libevent-devel`): build na copia `scratchpad/tmux-patch/build` (`sh autogen.sh && ./configure && make`), sem instalar; servidor isolado em socket proprio. Resultado: `cursor_attrs` = `none` no inicio, `dim` com o cursor no inicio de texto esmaecido (`x=2`), `none` depois de texto normal; `pane_last_output` vazio antes da primeira saida e atualizado a cada saida; `list-panes -a -F` aceita as duas. **Nao feito:** `regress/` do tmux, teste com os agentes reais (se o cursor do Codex fica no inicio do placeholder) e comparacao de custo.
+Arquivo: [`patches/tmux-3.7c-pane-signals.patch`](patches/tmux-3.7c-pane-signals.patch), sobre a tag `3.7c` (commit `e476c1230b958df0cb12977517d24b3dc931375b`). Aplica limpo (`patch -p1`, verificado em copia). **Compilado e testado em 2026-10-16** (apos o Jabbur instalar `autoconf` e `libevent-devel`): build na copia `scratchpad/tmux-patch/build` (`sh autogen.sh && ./configure && make`), sem instalar; servidor isolado em socket proprio. Resultado: `cursor_attrs` = `none` no inicio, `dim` com o cursor no inicio de texto esmaecido (`x=2`), `none` depois de texto normal; `pane_last_output` vazio antes da primeira saida e atualizado a cada saida; `list-panes -a -F` aceita as duas. **Com os agentes reais** (laboratorio isolado, tmux com patch em socket proprio, 2026-10-16; Claude 2.1.301/Haiku 5.5, Codex 0.162.1/gpt-6-luna, Pi 1.3.0), `cursor_attrs|cursor_x` com a caixa vazia, com rascunho `abc` e depois de `C-u`:
+
+| Agente | Caixa vazia (placeholder) | Rascunho `abc` | Depois de `C-u` |
+|---|---|---|---|
+| Claude | `dim`, x=2 | `none`, x=5 | `dim`, x=2 |
+| Codex | `dim`, x=2 | `none`, x=5 | `dim`, x=2 |
+| Pi | `reverse`, x=0 | `reverse`, x=3 | `reverse`, x=0 |
+
+Claude e Codex: o atributo sozinho separa placeholder (`dim`) de rascunho (`none`). Pi desenha o proprio cursor como celula invertida, entao o atributo e sempre `reverse`; ali o sinal e `cursor_x` (0 vazio, >0 rascunho; o Pi nao tem prefixo). Um turno e uma sessao por agente; sugestao fantasma do Claude (alem do placeholder `Try "..."`) nao reproduzida aqui. **Nao feito:** `regress/` do tmux e comparacao de custo.
 
 | Variavel de formato nova | Origem | Uso no agentd |
 | --- | --- | --- |
