@@ -434,6 +434,10 @@ fn confirma(a: &Amb, quem: &str, id: &str, estagio: &str, resultado: Option<&str
     if let Some(r) = resultado {
         v.push("--result");
         v.push(r);
+        if r == "refused" || r == "failed" {
+            v.push("--note");
+            v.push("nota do teste");
+        }
     }
     como(a, quem, &v)
 }

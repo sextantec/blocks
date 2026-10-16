@@ -153,6 +153,10 @@ impl Amb {
         if let Some(r) = resultado {
             v.push("--result");
             v.push(r);
+            if r == "refused" || r == "failed" {
+                v.push("--note");
+                v.push("nota do teste");
+            }
         }
         let r = self.cli_de(nome, &v);
         assert_eq!(r.code, Some(0), "ack {id} {estagio}: {r:?}");
