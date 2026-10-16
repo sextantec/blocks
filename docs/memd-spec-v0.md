@@ -73,10 +73,33 @@ Proposta: formato e limites da secao 3; `source` com `kind` valido, `ref` nao va
 ## 8. CLI (`--json` em todos; codigos da secao 6)
 `memd serve --state-dir D --config C --grants G [--socket S]`; `memd init DIR` (cria o diretorio de estado 0700, `config.json` e `grants.json` de **modelo, sem tokens**, e `LEIA-ME.md` generico que ensina o agente a ler/propor; idempotente; nunca sobrescreve); `memd propose|promote|reject|retire|get|query|view|whoami|status --token-file F`; `memd validate --state-dir D` (offline: confere o log com o `blocklog` e as invariantes: uma `active` por `id`, ids sem lacuna por tipo, `supersedes` consistentes); `memd token-hash` (le o token de stdin e imprime o SHA-256, para o dono montar o `grants.json`).
 
+## 8A. API de biblioteca (normativa; os testes de tempo, falha e protocolo compilam contra ela)
+O crate `memd` e **biblioteca + binario**. O socket e a CLI sao uma camada fina sobre `Service`; as regras vivem em `Service` e sao testadas ali, de forma deterministica (relogio e disco injetados via `blocklog`); socket, CLI, `SIGHUP`, `init` e `token-hash` sao testados no binario.
+```rust
+pub struct Config { /* chaves da secao 7: proposal_ttl_days, view_budget, view_overdue_max, max_open_proposals, max_records, max_connections, secret_patterns, line_max, response_max */ }
+impl Config { pub fn from_json(s: &str) -> Result<Config, String>; }          // faixa invalida/chave desconhecida = Err
+impl Default for Config { /* padroes da spec */ }
+pub struct Grants { /* perfis da secao 5 */ }
+impl Grants { pub fn from_json(s: &str) -> Result<Grants, String>; }
+pub fn token_sha256_hex(token: &str) -> String;                                 // SHA-256 hex minusculo do token
+
+pub struct Service { /* privado */ }
+impl Service {
+    pub fn new(cfg: Config, grants: Grants, log: blocklog::Log, replay: Vec<blocklog::Commit>,
+               clock: Box<dyn blocklog::Clock>) -> Result<Service, String>;     // reconstroi o estado dos commits; log invalido = Err
+    pub fn handle_line(&mut self, line: &str) -> String;   // uma requisicao (secao 6) -> uma resposta, sem '\n'; erros viram resposta {ok:false}
+    pub fn tick(&mut self);                                // roda a expiracao da secao 4 com o relogio injetado
+    pub fn reload_grants(&mut self, grants: Grants);       // equivale ao SIGHUP
+    pub fn head_seq(&self) -> u64;
+    pub fn is_broken(&self) -> bool;
+}
+```
+`handle_line` nunca entra em panico com entrada arbitraria (linha maior que `line_max`, JSON invalido, UTF-8 invalido tratado antes pelo chamador = `invalid_params`). A concorrencia (32 clientes) e do servidor de socket, que serializa as chamadas a `Service` sob um mutex.
+
 ## 9. Seguranca e privacidade
 Sem rede. Texto de `body`/`title` nunca em logs de diagnostico, `status` ou mensagens de erro (so ids e codigos). A memoria privada do Sextante nao e importada. O repositorio publico `blocks` nao contem estado do `memd`; o estado vive no diretorio do dono. Conteudo e dado, nunca instrucao; a spec nao promete que um consumidor ignore ordens dentro de um texto.
 
-## 10. Contrato testavel (testes independentes; daemon real em diretorio temporario; `LogFile`/`Clock` injetaveis do `blocklog` para falhas e tempo; sem rede)
+## 10. Contrato testavel (testes independentes; tempo, falhas e protocolo por `Service` (secao 8A) com `blocklog::Storage`/`Clock` falsos; socket, CLI, `SIGHUP`, `init`, `token-hash`, `validate` e concorrencia pelo binario em diretorio temporario; sem rede)
 Formato: **pre-condicao -> acao -> oraculo exato.** Os testes do motor estao em `blocklog-spec-v0.md` (B1-B28) e nao se repetem aqui.
 - **Mutacoes:** M1 `propose` novo -> `D-001` rev 1 `proposed`; ids por tipo sem lacuna e sem repeticao (32 `propose` simultaneos = 32 ids distintos); M2 revisao com `expected_rev` errado = `stale_rev`; M3 `promote` com `expected_seq` errado = `stale_seq`; M4 `promote` de revisao deixa a anterior `superseded` com `superseded_by`, e ambas mudam no **mesmo** commit (cauda cortada: nenhuma ou ambas); M5 `supersedes` de id `active` o marca `superseded` no mesmo commit; M6 `supersedes` de id inexistente/ilegivel = `not_found` e **nada** muda; M7 `reject`/`retire` mudam so o estado esperado; M8 `expire`: proposta com idade >= `proposal_ttl_days` vira `expired` (relogio injetado), menor nao; M9 relogio regressivo nao expira antes nem ressuscita; M10 duas `active` do mesmo `type`/`scope`/`title` = `conflict`; M11 `max_open_proposals` = `quota`.
 - **Idempotencia:** I1 mesmo `request_id` e carga: um unico commit e resposta igual com `replayed:true`; I2 mesmo `request_id` e carga diferente = `request_conflict`; I3 repeticao depois de reiniciar o daemon devolve o original; I4 repeticao apos perder o direito de leitura do registro devolve `not_found`, nao o resultado; I5 mutacao sem `request_id` = `invalid_params`.

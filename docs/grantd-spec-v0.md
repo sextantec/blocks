@@ -55,6 +55,27 @@ Todas as mutacoes exigem `request_id` (mesma regra do `memd`, secao 6 dele) e ro
 ## 7. CLI (`--json` em todos)
 `grantd serve --state-dir D --config C --grants G [--socket S]`; `grantd init DIR` (estado 0700, modelo sem tokens, `LEIA-ME.md` generico; idempotente); `grantd check|use|explain --agent A --action X --resource R [--qty N --unit U --request-id R]`; `grantd grant|deny-rule|revoke|approve-request|reject-request ...` (owner); `grantd request|delegate|list|show|whoami|status --token-file F`; `grantd validate --state-dir D` (offline: log, `delegate` dentro do pai, nenhuma `active` sem `until` nem `permanent`, cascata consistente); `grantd token-hash`. Modo texto de `check`: `allow G-014 ate 2026-10-17T03:00:00Z` ou `deny no_grant`.
 
+## 7A. API de biblioteca (normativa; mesmo molde do `memd`, secao 8A dele)
+O crate `grantd` e **biblioteca + binario**; as regras vivem em `Service`, testadas com relogio e disco injetados (`blocklog`); socket, CLI, `SIGHUP`, `init`, `token-hash`, `validate` e concorrencia sao testados pelo binario.
+```rust
+pub struct Config { /* max_pending_requests (5), line_max, response_max, max_connections */ }
+impl Config { pub fn from_json(s: &str) -> Result<Config, String>; }  impl Default for Config { /* padroes */ }
+pub struct Grants { /* perfis da secao 6 */ }
+impl Grants { pub fn from_json(s: &str) -> Result<Grants, String>; }
+pub fn token_sha256_hex(token: &str) -> String;
+
+pub struct Service { /* privado */ }
+impl Service {
+    pub fn new(cfg: Config, grants: Grants, log: blocklog::Log, replay: Vec<blocklog::Commit>,
+               clock: Box<dyn blocklog::Clock>) -> Result<Service, String>;
+    pub fn handle_line(&mut self, line: &str) -> String;   // uma requisicao -> uma resposta, sem '\n'
+    pub fn reload_grants(&mut self, grants: Grants);
+    pub fn head_seq(&self) -> u64;
+    pub fn is_broken(&self) -> bool;
+}
+```
+`handle_line` nunca entra em panico com entrada arbitraria. `check`, `explain`, `list`, `show`, `whoami` e `status` nao gravam; as demais mutacoes passam por `blocklog::Log::commit`.
+
 ## 8. Seguranca
 Sem rede. Token e `reason`/`resource` com segredo nunca em log de diagnostico (so ids e codigos). A varredura de segredos do `memd` se aplica a `reason` e `ref` (mesma lista). `secret`-como-acao (`read_secret`) nao existe: o que o dono nunca quer fazer vira `deny_rule` permanente em `fs.read` sobre os caminhos de credencial, **como conteudo**, nao mecanismo.
 
@@ -65,7 +86,7 @@ Sem rede. Token e `reason`/`resource` com segredo nunca em log de diagnostico (s
 - **Politica do chamador:** `check` indisponivel (saida 5) = **negar** para `risk` alto; para baixo o chamador decide e registra. Na v1 o chamador pode exigir `signed:true`.
 - **Nada e automatico na v0:** cada ponto de integracao e uma fatia propria.
 
-## 10. Contrato testavel (testes independentes; daemon real em diretorio temporario; `LogFile`/`Clock` injetaveis; sem rede)
+## 10. Contrato testavel (testes independentes; regras por `Service` (secao 7A) com `blocklog::Storage`/`Clock` falsos; socket, CLI, `SIGHUP`, `init`, `token-hash`, `validate` e concorrencia pelo binario; sem rede)
 Formato: **pre-condicao -> acao -> oraculo exato.** O motor esta em `blocklog-spec-v0.md` (B1-B28).
 - **Decisao:** G1 sem concessao -> `check` = `deny no_grant`; G2 `allow` casando -> `allow` com o id; G3 `deny` casando + `allow` casando -> `deny denied_by`; G4 `until` no passado -> `deny no_grant`; G5 `not_before` futuro -> `deny no_grant`; G6 glob `*` casa um segmento, `**` varios (tabela de 12 caminhos); G7 `resource` com `..`, `//`, relativo ou glob em `check` = `invalid_params`; G8 `grantee:*` vale para qualquer agente; G9 `invalid_action` nao e `deny`; G10 relogio regressivo nao reativa concessao expirada nem reabre janela; G11 `explain` lista as que casaram.
 - **Constraints:** G12 `max_uses` = 2: `use` 1 e 2 `allow`, terceiro `deny exhausted`; `check` nao consome; G13 `max_amount` 10 `unit usd` com `window_s` 60: `use` qty 6 e 4 allow, `qty` 1 deny, apos 61 s (relogio injetado) volta a permitir; G14 `use` com o mesmo `request_id` consome uma vez (`replayed:true`) e carga diferente = `request_conflict`.
