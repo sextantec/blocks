@@ -1,7 +1,7 @@
 //! Subcomandos do cliente: `send`, `inbox`, `ack`, `status`, `watch` e `log` (spec v1 4 e v1.1 D).
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::ops::Deref;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -550,6 +550,7 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
         "id",
         "ref",
         "due",
+        "attach",
     ]);
     let o = client_opts(args, &vals, &["json", "keep-open"])?;
     let from = identity(&o, "from")?;
@@ -596,9 +597,6 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
     if let Some(t) = o.get("thread") {
         params.insert("thread".into(), json!(t));
     }
-    if !refs.is_empty() {
-        params.insert("refs".into(), Value::Array(refs));
-    }
     if o.flag("keep-open") {
         params.insert("keep_open".into(), json!(true));
     }
@@ -606,6 +604,21 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
         params.insert("due_s".into(), json!(parse_due(due)?));
     }
     let mut s = open(&o, Some(from_name.as_str()))?;
+    let mut uploaded = None;
+    if let Some(path) = o.get("attach") {
+        let to = o.req("to")?;
+        let (mut file, size, real_name) = open_attachment(path)?;
+        let result = upload_file(&mut s, &mut file, size, to, &real_name, None)?;
+        let blob = result["blob"]
+            .as_str()
+            .ok_or_else(|| Failure::Run("resposta de put sem blob".into()))?
+            .to_string();
+        refs.push(json!({"t":"blob","v":blob}));
+        uploaded = Some(blob);
+    }
+    if !refs.is_empty() {
+        params.insert("refs".into(), Value::Array(refs));
+    }
     let r = match s.call("message.send", Value::Object(params)) {
         Ok(result) => result,
         Err(Rpc::NoResponse(message)) => {
@@ -613,7 +626,12 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
                 "{message}; id da mensagem para reconciliar: {id}"
             )));
         }
-        Err(error) => return Err(rpc_fail(error)),
+        Err(error) => {
+            if let Some(blob) = uploaded.as_deref() {
+                let _ = s.call("blob.rm", json!({"v":1,"blob":blob}));
+            }
+            return Err(rpc_fail(error));
+        }
     };
     if o.flag("json") {
         println!(
@@ -628,13 +646,362 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
     Ok(())
 }
 
+fn open_attachment(path: &str) -> Result<(File, u64, String), Failure> {
+    let path = expand_home(path);
+    let meta = fs::symlink_metadata(&path)
+        .map_err(|e| Failure::Run(format!("nao acessei o anexo: {e}")))?;
+    if !meta.file_type().is_file() {
+        return Err(usage(
+            "o anexo deve ser arquivo regular, sem link simbolico",
+        ));
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| usage("nome de arquivo de anexo invalido"))?
+        .to_string();
+    if crate::blobs::denied_filename(&name) {
+        return Err(usage("nome do arquivo bloqueado pela denylist de anexos"));
+    }
+    if meta.len() > crate::blobs::BLOB_MAX {
+        return Err(usage("anexo acima do limite de 8 MiB"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|e| Failure::Run(format!("nao abri o anexo: {e}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| Failure::Run(format!("nao validei o anexo: {e}")))?;
+    if !opened.is_file() || opened.len() != meta.len() {
+        return Err(usage("o anexo mudou durante a validacao"));
+    }
+    Ok((file, opened.len(), name))
+}
+
+fn parse_blob_ttl(s: &str) -> Result<u64, Failure> {
+    let (n, unit) = s.split_at(s.len().saturating_sub(1));
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(usage("--ttl deve ser N(s|m|h|d)"));
+    }
+    let value = n
+        .parse::<u64>()
+        .map_err(|_| usage("--ttl fora do intervalo"))?;
+    let factor = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(usage("--ttl deve terminar em s, m, h ou d")),
+    };
+    let seconds = value
+        .checked_mul(factor)
+        .ok_or_else(|| usage("--ttl fora do intervalo"))?;
+    if !(60..=604_800).contains(&seconds) {
+        return Err(usage("--ttl deve ser de 60 s a 7 dias"));
+    }
+    Ok(seconds)
+}
+
+fn upload_file(
+    s: &mut Session,
+    file: &mut File,
+    size: u64,
+    to: &str,
+    name: &str,
+    ttl: Option<u64>,
+) -> Result<Value, Failure> {
+    let mut begin = json!({"v":1,"size":size,"to":to,"name":name});
+    if let Some(ttl) = ttl {
+        begin["ttl_s"] = json!(ttl);
+    }
+    let start = s.call("blob.put.begin", begin).map_err(rpc_fail)?;
+    let upload_id = start["upload_id"]
+        .as_str()
+        .ok_or_else(|| Failure::Run("resposta de put.begin invalida".into()))?
+        .to_string();
+    let mut hash = crate::hash::Sha256::default();
+    let mut buf = vec![0u8; crate::blobs::CHUNK_MAX];
+    let mut n = 0u64;
+    loop {
+        let got = file
+            .read(&mut buf)
+            .map_err(|e| Failure::Run(format!("falha lendo anexo: {e}")))?;
+        if got == 0 {
+            break;
+        }
+        let data = &buf[..got];
+        hash.update(data);
+        let params =
+            json!({"v":1,"upload_id":upload_id,"n":n,"data":crate::blobs::base64_encode(data)});
+        if let Err(e) = s.call("blob.put.chunk", params) {
+            return Err(rpc_fail(e));
+        }
+        n += 1;
+    }
+    let digest = hash.finalize_hex();
+    s.call(
+        "blob.put.end",
+        json!({"v":1,"upload_id":upload_id,"sha256":digest}),
+    )
+    .map_err(rpc_fail)
+}
+
+pub fn put(args: &[String]) -> Result<(), Failure> {
+    let (path, rest) = args.split_first().ok_or_else(|| usage("put exige FILE"))?;
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.extend(["to", "name", "ttl", "as"]);
+    let o = client_opts(rest, &vals, &["json"])?;
+    let who = identity(&o, "as")?;
+    let who = need(&who, "put")?.to_string();
+    let to = o.req("to")?.to_string();
+    let (mut file, size, real_name) = open_attachment(path)?;
+    let name = o.get("name").unwrap_or(&real_name).to_string();
+    if crate::blobs::denied_filename(&name)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        || !(1..=64).contains(&name.len())
+    {
+        return Err(usage("--name deve conter 1 a 64 caracteres ASCII validos"));
+    }
+    let ttl = o.get("ttl").map(parse_blob_ttl).transpose()?;
+    let mut s = open(&o, Some(&who))?;
+    let result = upload_file(&mut s, &mut file, size, &to, &name, ttl)?;
+    if o.flag("json") {
+        println!(
+            "{}",
+            json!({"v":1,"blob":result["blob"],"size":result["size"],"expires_at":result["expires_at"]})
+        );
+    } else {
+        println!("{}", txt(&result["blob"]));
+    }
+    Ok(())
+}
+
+fn rpc_blob_list(s: &mut Session, after: Option<&str>) -> Result<Vec<Value>, Failure> {
+    let mut all = Vec::new();
+    let mut cursor = after.map(str::to_string);
+    loop {
+        let mut p = json!({"v":1});
+        if let Some(c) = cursor.as_deref() {
+            p["after"] = json!(c);
+        }
+        let r = s.call("blob.list", p).map_err(rpc_fail)?;
+        all.extend(r["blobs"].as_array().cloned().unwrap_or_default());
+        cursor = r["next"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(all)
+}
+
+struct TempDownload {
+    file: Option<File>,
+    temp: PathBuf,
+    target: PathBuf,
+    parent: PathBuf,
+    keep: bool,
+}
+
+impl TempDownload {
+    fn new(target: &Path) -> Result<Self, Failure> {
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        if target.file_name().is_none() {
+            return Err(usage("caminho de saida invalido"));
+        }
+        match fs::symlink_metadata(target) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(usage("saida sobre link simbolico recusada"));
+            }
+            Ok(_) => return Err(usage("arquivo de saida ja existe; nao sobrescrevo")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(classify_output_error(e, "nao validei destino de saida")),
+        }
+        let temp = parent.join(format!(".chatd-{}.tmp", random_id()?));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temp)
+            .map_err(|e| classify_output_error(e, "nao criei temporario de saida"))?;
+        Ok(Self {
+            file: Some(file),
+            temp,
+            target: target.to_path_buf(),
+            parent,
+            keep: false,
+        })
+    }
+
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), Failure> {
+        self.file
+            .as_mut()
+            .expect("temporary output is open")
+            .write_all(bytes)
+            .map_err(|e| classify_output_error(e, "nao gravei saida"))
+    }
+
+    fn finish(mut self) -> Result<(), Failure> {
+        self.file
+            .take()
+            .expect("temporary output is open")
+            .sync_all()
+            .map_err(|e| classify_output_error(e, "nao sincronizei saida"))?;
+        fs::hard_link(&self.temp, &self.target)
+            .map_err(|e| classify_output_error(e, "nao finalizei saida"))?;
+        fs::remove_file(&self.temp)
+            .map_err(|e| classify_output_error(e, "nao removi temporario de saida"))?;
+        self.keep = true;
+        File::open(&self.parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| classify_output_error(e, "nao sincronizei diretorio de saida"))?;
+        Ok(())
+    }
+}
+
+impl Drop for TempDownload {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.temp);
+        }
+    }
+}
+
+pub fn ls(args: &[String]) -> Result<(), Failure> {
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.push("as");
+    let o = client_opts(args, &vals, &["json"])?;
+    let who = identity(&o, "as")?;
+    let who = need(&who, "ls")?.to_string();
+    let mut s = open(&o, Some(&who))?;
+    let items = rpc_blob_list(&mut s, None)?;
+    if o.flag("json") {
+        println!("{}", Value::Array(items));
+    } else {
+        for b in items {
+            println!(
+                "{} {}>{} {} {} expires_in={}",
+                txt(&b["blob"]),
+                txt(&b["owner"]),
+                txt(&b["to"]),
+                txt(&b["size"]),
+                txt(&b["name"]),
+                txt(&b["expires_in"])
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn rm(args: &[String]) -> Result<(), Failure> {
+    let (blob, rest) = args.split_first().ok_or_else(|| usage("rm exige BLOB"))?;
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.push("as");
+    let o = client_opts(rest, &vals, &[])?;
+    let who = identity(&o, "as")?;
+    let who = need(&who, "rm")?.to_string();
+    let mut s = open(&o, Some(&who))?;
+    s.call("blob.rm", json!({"v":1,"blob":blob}))
+        .map_err(rpc_fail)?;
+    println!("ok");
+    Ok(())
+}
+
+pub fn get(args: &[String]) -> Result<(), Failure> {
+    let (blob, rest) = args.split_first().ok_or_else(|| usage("get exige BLOB"))?;
+    let mut vals = SOCKET_OPTS.to_vec();
+    vals.extend(["out", "as"]);
+    let o = client_opts(rest, &vals, &["consume"])?;
+    let who = identity(&o, "as")?;
+    let who = need(&who, "get")?.to_string();
+    let mut s = open(&o, Some(&who))?;
+    let metadata = rpc_blob_list(&mut s, None)?
+        .into_iter()
+        .find(|v| v["blob"].as_str() == Some(blob))
+        .ok_or_else(|| Failure::Run("not_found: blob nao encontrado".into()))?;
+    let size = metadata["size"]
+        .as_u64()
+        .ok_or_else(|| Failure::Run("metadados de blob invalidos".into()))?;
+    let expected = metadata["sha256"].as_str().unwrap_or("").to_string();
+    let out = o.get("out").unwrap_or("-");
+    let mut temp = if out == "-" {
+        None
+    } else {
+        Some(TempDownload::new(Path::new(out))?)
+    };
+    let mut stdout_data = Vec::with_capacity(if out == "-" {
+        size.min(crate::blobs::BLOB_MAX) as usize
+    } else {
+        0
+    });
+    let mut offset = 0u64;
+    let mut hash = crate::hash::Sha256::default();
+    while offset < size {
+        let len = (size - offset).min(crate::blobs::CHUNK_MAX as u64);
+        let r = s
+            .call(
+                "blob.get",
+                json!({"v":1,"blob":blob,"offset":offset,"length":len}),
+            )
+            .map_err(rpc_fail)?;
+        let bytes = crate::blobs::base64_decode(r["data"].as_str().unwrap_or(""))
+            .ok_or_else(|| Failure::Run("resposta base64 de blob invalida".into()))?;
+        if bytes.len() as u64 != len {
+            return Err(Failure::Run("resposta incompleta de blob".into()));
+        }
+        hash.update(&bytes);
+        if let Some(target) = temp.as_mut() {
+            target.write_chunk(&bytes)?;
+        } else {
+            stdout_data.extend_from_slice(&bytes);
+        }
+        offset += len;
+    }
+    if hash.finalize_hex() != expected {
+        return Err(Failure::Run(
+            "sha256 do blob diverge; nenhum arquivo foi salvo".into(),
+        ));
+    }
+    if out == "-" {
+        io::stdout()
+            .write_all(&stdout_data)
+            .map_err(|e| Failure::Run(format!("nao escrevi stdout: {e}")))?;
+    } else {
+        temp.take().expect("file output selected").finish()?;
+    }
+    if o.flag("consume") {
+        s.call("blob.rm", json!({"v":1,"blob":blob}))
+            .map_err(rpc_fail)?;
+    }
+    Ok(())
+}
+
+fn classify_output_error(e: std::io::Error, what: &str) -> Failure {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        Failure::PermissionDenied(format!("{what}: permissao negada"))
+    } else {
+        Failure::Run(format!("{what}: {e}"))
+    }
+}
+
 pub fn inbox(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.extend(["as", "after"]);
-    let o = client_opts(args, &vals, &["all", "take", "ids", "json"])?;
+    let o = client_opts(args, &vals, &["all", "take", "ids", "json", "count"])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "inbox")?.to_string();
     let take = o.flag("take");
+    if o.flag("count") {
+        return inbox_count(&o, &name, take);
+    }
     if take && (o.flag("all") || o.get("after").is_some()) {
         return Err(usage("--take nao combina com --all nem --after"));
     }
@@ -670,6 +1037,22 @@ pub fn inbox(args: &[String]) -> Result<(), Failure> {
             _ => break,
         }
     }
+    Ok(())
+}
+
+fn inbox_count(o: &ClientOpts, name: &str, take: bool) -> Result<(), Failure> {
+    if take || o.flag("all") || o.flag("ids") || o.flag("json") || o.get("after").is_some() {
+        return Err(usage("--count nao combina com outras opcoes de inbox"));
+    }
+    let mut s = open(o, Some(name))?;
+    let r = s
+        .call("mailbox.counts", json!({"v": 1}))
+        .map_err(rpc_fail)?;
+    println!(
+        "pendentes={} aceitas={}",
+        txt(&r["pending"]),
+        txt(&r["accepted"])
+    );
     Ok(())
 }
 
@@ -770,28 +1153,28 @@ pub fn status(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
     vals.push("as");
     let o = client_opts(args, &vals, &["json"])?;
-    let name = identity(&o, "as")?;
-    let mut s = match name.as_deref() {
-        Some(name) => open(&o, Some(name))?,
-        None => open_without_auth(&o)?,
-    };
+    let _name = identity(&o, "as")?;
+    let mut s = open_without_auth(&o)?;
     let r = s.call("status", json!({"v": 1})).map_err(rpc_fail)?;
     if o.flag("json") {
         println!("{r}");
         return Ok(());
     }
+    println!("ok {}", txt(&r["ok"]));
+    println!("uptime_s {}", txt(&r["uptime_s"]));
     println!("head_seq {}", txt(&r["head_seq"]));
-    if let Some(recs) = r["recipients"].as_object() {
-        for (n, info) in recs {
-            println!(
-                "{n} pendentes={} aceitas={} campainha={} ultimo_bell_seq={}",
-                txt(&info["pending"]),
-                txt(&info["accepted"]),
-                txt(&info["bell"]),
-                txt(&info["last_bell_seq"])
-            );
-        }
-    }
+    println!(
+        "mensagens total={} registradas={} aceitas={} resultado={}",
+        txt(&r["messages"]["total"]),
+        txt(&r["messages"]["registered"]),
+        txt(&r["messages"]["accepted"]),
+        txt(&r["messages"]["resulted"])
+    );
+    println!(
+        "blobs count={} bytes={}",
+        txt(&r["blobs"]["count"]),
+        txt(&r["blobs"]["bytes"])
+    );
     Ok(())
 }
 

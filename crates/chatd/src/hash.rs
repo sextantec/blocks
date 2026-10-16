@@ -55,58 +55,112 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+#[derive(Clone)]
+pub struct Sha256 {
+    h: [u32; 8],
+    buffer: [u8; 64],
+    used: usize,
+    bytes: u64,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self {
+            h: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buffer: [0; 64],
+            used: 0,
+            bytes: 0,
+        }
+    }
+}
+
+impl Sha256 {
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.bytes = self.bytes.wrapping_add(data.len() as u64);
+        if self.used > 0 {
+            let n = (64 - self.used).min(data.len());
+            self.buffer[self.used..self.used + n].copy_from_slice(&data[..n]);
+            self.used += n;
+            data = &data[n..];
+            if self.used == 64 {
+                transform(&mut self.h, &self.buffer);
+                self.used = 0;
+            }
+        }
+        while data.len() >= 64 {
+            let block: &[u8; 64] = data[..64].try_into().expect("fixed block length");
+            transform(&mut self.h, block);
+            data = &data[64..];
+        }
+        self.buffer[..data.len()].copy_from_slice(data);
+        self.used = data.len();
+    }
+
+    pub fn finalize_hex(mut self) -> String {
+        let bit_len = self.bytes.wrapping_mul(8);
+        self.buffer[self.used] = 0x80;
+        self.used += 1;
+        if self.used > 56 {
+            self.buffer[self.used..].fill(0);
+            transform(&mut self.h, &self.buffer);
+            self.buffer = [0; 64];
+            self.used = 0;
+        }
+        self.buffer[self.used..56].fill(0);
+        self.buffer[56..].copy_from_slice(&bit_len.to_be_bytes());
+        transform(&mut self.h, &self.buffer);
+        self.h.iter().map(|x| format!("{x:08x}")).collect()
+    }
+}
+
+fn transform(h: &mut [u32; 8], block: &[u8; 64]) {
+    let mut w = [0u32; 64];
+    for (i, c) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*c);
+    }
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
+    let mut v = *h;
+    for i in 0..64 {
+        let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+        let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+        let t1 = v[7]
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(K[i])
+            .wrapping_add(w[i]);
+        let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+        let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+        let t2 = s0.wrapping_add(maj);
+        v = [
+            t1.wrapping_add(t2),
+            v[0],
+            v[1],
+            v[2],
+            v[3].wrapping_add(t1),
+            v[4],
+            v[5],
+            v[6],
+        ];
+    }
+    for (a, b) in h.iter_mut().zip(v) {
+        *a = a.wrapping_add(b);
+    }
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for block in msg.as_chunks::<64>().0 {
-        let mut w = [0u32; 64];
-        for (i, c) in block.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*c);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let mut v = h;
-        for i in 0..64 {
-            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
-            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
-            let t1 = v[7]
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
-            let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
-            let t2 = s0.wrapping_add(maj);
-            v = [
-                t1.wrapping_add(t2),
-                v[0],
-                v[1],
-                v[2],
-                v[3].wrapping_add(t1),
-                v[4],
-                v[5],
-                v[6],
-            ];
-        }
-        for (a, b) in h.iter_mut().zip(v) {
-            *a = a.wrapping_add(b);
-        }
-    }
-    h.iter().map(|x| format!("{x:08x}")).collect()
+    let mut h = Sha256::default();
+    h.update(data);
+    h.finalize_hex()
 }
 
 #[cfg(test)]
@@ -127,5 +181,15 @@ mod tests {
             sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
+    }
+
+    #[test]
+    fn sha256_incremental_matches_one_shot_across_block_boundaries() {
+        let data = vec![0x5a; 8 * 1024 * 1024];
+        let mut streamed = Sha256::default();
+        for part in data.chunks(512 * 1024) {
+            streamed.update(part);
+        }
+        assert_eq!(streamed.finalize_hex(), sha256_hex(&data));
     }
 }

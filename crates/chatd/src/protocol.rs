@@ -13,9 +13,9 @@ pub const TAKE_DEFAULT: usize = 50;
 pub const LIST_DEFAULT: u64 = 50;
 pub const LIST_MAX: u64 = 200;
 pub const KINDS: [&str; 5] = ["AVISO", "PEDIDO", "PERGUNTA", "RESPOSTA", "ACK"];
-pub const REF_TYPES: [&str; 5] = ["path", "commit", "msg", "job", "url"];
+pub const REF_TYPES: [&str; 6] = ["path", "commit", "msg", "job", "url", "blob"];
 /// Metodos disponiveis depois da autenticacao (ou sempre, com `auth: off`).
-pub const METHODS: [&str; 8] = [
+pub const METHODS: [&str; 15] = [
     "message.send",
     "message.list",
     "message.take",
@@ -24,6 +24,13 @@ pub const METHODS: [&str; 8] = [
     "status",
     "agent.bind",
     "message.get",
+    "mailbox.counts",
+    "blob.put.begin",
+    "blob.put.chunk",
+    "blob.put.end",
+    "blob.get",
+    "blob.rm",
+    "blob.list",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -278,11 +285,7 @@ pub fn parse_refs(value: Option<&Value>) -> Result<Vec<Ref>, ApiError> {
             }
         };
         let v = match o.get("v") {
-            Some(Value::String(s))
-                if (1..=MAX_REF_V).contains(&s.chars().count()) && !has_control(s, &[]) =>
-            {
-                s.clone()
-            }
+            Some(Value::String(s)) if valid_ref_value(&t, s) => s.clone(),
             _ => {
                 return Err(ApiError::invalid(
                     &format!("/refs/{i}/v"),
@@ -293,6 +296,21 @@ pub fn parse_refs(value: Option<&Value>) -> Result<Vec<Ref>, ApiError> {
         out.push(Ref { t, v });
     }
     Ok(out)
+}
+
+fn valid_blob_id(s: &str) -> bool {
+    s.strip_prefix("blob:").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
+fn valid_ref_value(kind: &str, value: &str) -> bool {
+    (1..=MAX_REF_V).contains(&value.chars().count())
+        && !has_control(value, &[])
+        && (kind != "blob" || valid_blob_id(value))
 }
 
 pub fn refs_to_json(refs: &[Ref]) -> Value {

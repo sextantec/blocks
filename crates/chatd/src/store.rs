@@ -54,6 +54,18 @@ pub struct Msg {
     pub since: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BlobRecord {
+    pub id: String,
+    pub owner: String,
+    pub to: String,
+    pub size: u64,
+    pub name: String,
+    pub sha256: String,
+    pub created_at: String,
+    pub ttl_s: u64,
+}
+
 /// Mensagem no formato do protocolo (spec v1 5.2, com `refs` da v1.1).
 pub fn msg_json(m: &Msg) -> Value {
     json!({
@@ -93,6 +105,27 @@ fn str_field<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, Stri
         .ok_or_else(|| format!("campo '{key}' ausente ou invalido"))
 }
 
+fn valid_blob_id(s: &str) -> bool {
+    s.strip_prefix("blob:").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
+}
+
+fn valid_blob_name(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn valid_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
 pub struct Store {
     log: File,
     _lock: File,
@@ -106,6 +139,7 @@ pub struct Store {
     bell_fail_at: HashMap<String, Instant>,
     broken: bool,
     receipt_times: HashMap<String, VecDeque<Instant>>,
+    pub blobs: HashMap<String, BlobRecord>,
 }
 
 fn open_private(path: &Path) -> Result<File, String> {
@@ -144,6 +178,7 @@ impl Store {
             bell_fail_at: HashMap::new(),
             broken: false,
             receipt_times: HashMap::new(),
+            blobs: HashMap::new(),
         };
         let mut pos = 0usize;
         let mut cut: Option<usize> = None;
@@ -379,9 +414,94 @@ impl Store {
                 str_field(obj, "recipient")?;
                 str_field(obj, "reason")?;
             }
+            kind @ ("blob_put" | "blob_got" | "blob_removed" | "blob_expired") => {
+                self.apply_blob_event(kind, obj)?;
+            }
             other => return Err(format!("tipo de evento desconhecido '{other}'")),
         }
         self.events.push(ev.clone());
+        Ok(())
+    }
+
+    fn apply_blob_event(&mut self, kind: &str, obj: &Map<String, Value>) -> Result<(), String> {
+        let id = str_field(obj, "blob")?;
+        if !valid_blob_id(id) {
+            return Err("id de blob invalido".to_string());
+        }
+        match kind {
+            "blob_put" => {
+                if self.blobs.contains_key(id) {
+                    return Err("id de blob duplicado".to_string());
+                }
+                let record = BlobRecord {
+                    id: id.to_string(),
+                    owner: str_field(obj, "owner")?.to_string(),
+                    to: str_field(obj, "to")?.to_string(),
+                    size: obj
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .ok_or("size ausente")?,
+                    name: str_field(obj, "name")?.to_string(),
+                    sha256: str_field(obj, "sha256")?.to_string(),
+                    created_at: str_field(obj, "created_at")?.to_string(),
+                    ttl_s: obj
+                        .get("ttl_s")
+                        .and_then(Value::as_u64)
+                        .ok_or("ttl_s ausente")?,
+                };
+                if !protocol::valid_name(&record.owner)
+                    || !protocol::valid_name(&record.to)
+                    || !valid_blob_name(&record.name)
+                    || !valid_sha256(&record.sha256)
+                    || !(60..=604_800).contains(&record.ttl_s)
+                    || record.size > 8 * 1024 * 1024
+                {
+                    return Err("evento blob_put invalido".to_string());
+                }
+                self.blobs.insert(id.to_string(), record);
+            }
+            "blob_got" => {
+                let record = self
+                    .blobs
+                    .get(id)
+                    .ok_or_else(|| "blob_got para id ausente".to_string())?;
+                let by = str_field(obj, "by")?;
+                let offset = obj
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .ok_or("offset ausente")?;
+                let length = obj
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .ok_or("length ausente")?;
+                if !protocol::valid_name(by)
+                    || (by != record.owner && by != record.to)
+                    || str_field(obj, "owner")? != record.owner
+                    || str_field(obj, "to")? != record.to
+                    || offset
+                        .checked_add(length)
+                        .is_none_or(|end| end > record.size)
+                {
+                    return Err("evento blob_got invalido".to_string());
+                }
+            }
+            "blob_removed" | "blob_expired" => {
+                let record = self
+                    .blobs
+                    .get(id)
+                    .ok_or_else(|| "remocao para blob ausente".to_string())?;
+                let reason = str_field(obj, "reason")?;
+                if str_field(obj, "owner")? != record.owner
+                    || str_field(obj, "to")? != record.to
+                    || (kind == "blob_expired" && reason != "ttl")
+                    || (kind == "blob_removed" && !matches!(reason, "requested" | "missing"))
+                {
+                    return Err("evento de remocao de blob invalido".to_string());
+                }
+                self.blobs.remove(id);
+            }
+            _ => return Err("tipo de evento blob invalido".to_string()),
+        }
         Ok(())
     }
 
@@ -437,6 +557,63 @@ impl Store {
         self.events.len() as u64
     }
 
+    pub fn blob_event(
+        &mut self,
+        kind: &str,
+        fields: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> Result<(), ApiError> {
+        self.append_event(kind, fields)
+    }
+
+    pub fn mailbox_counts_for(&self, who: &str) -> Value {
+        let mut pending = 0u64;
+        let mut accepted = 0u64;
+        for m in self.msgs.values().filter(|m| m.to == who) {
+            match m.state {
+                State::Registrado => pending += 1,
+                State::Aceito => accepted += 1,
+                State::Resultado => {}
+            }
+        }
+        let bell = if !self.recipients.get(who).copied().unwrap_or(false) {
+            "none"
+        } else if self.outstanding.contains_key(who) {
+            "outstanding"
+        } else {
+            "idle_wait"
+        };
+        json!({"v": 1, "pending": pending, "accepted": accepted, "bell": bell,
+            "last_bell_seq": self.last_bell_seq.get(who).copied()})
+    }
+
+    pub fn status_stats(&self, uptime_s: u64, connections: usize) -> Value {
+        let mut registered = 0u64;
+        let mut accepted = 0u64;
+        let mut resulted = 0u64;
+        for m in self.msgs.values() {
+            match m.state {
+                State::Registrado => registered += 1,
+                State::Aceito => accepted += 1,
+                State::Resultado => resulted += 1,
+            }
+        }
+        let sent = self
+            .events
+            .iter()
+            .filter(|e| e["type"] == "bell_sent")
+            .count();
+        let failed = self
+            .events
+            .iter()
+            .filter(|e| e["type"] == "bell_failed")
+            .count();
+        let bytes: u64 = self.blobs.values().map(|b| b.size).sum();
+        json!({"v":1,"ok":true,"version":env!("CARGO_PKG_VERSION"),"uptime_s":uptime_s,
+            "head_seq":self.head(),"messages":{"total":self.msgs.len(),"registered":registered,"accepted":accepted,"resulted":resulted},
+            "bells":{"sent":sent,"failed":failed},"connections":connections,
+            "blobs":{"count":self.blobs.len(),"bytes":bytes}})
+    }
+
     /// Eventos com seq > after, em ordem.
     pub fn events_after(&self, after: u64) -> Vec<Value> {
         self.events.iter().skip(after as usize).cloned().collect()
@@ -460,6 +637,10 @@ impl Store {
             }
             Some("bell_sent") | Some("bell_failed") => {
                 obj.get("recipient").and_then(Value::as_str) == Some(who)
+            }
+            Some("blob_put") | Some("blob_got") | Some("blob_removed") | Some("blob_expired") => {
+                obj.get("owner").and_then(Value::as_str) == Some(who)
+                    || obj.get("to").and_then(Value::as_str) == Some(who)
             }
             _ => false,
         }
@@ -871,40 +1052,9 @@ impl Store {
         )
     }
 
-    /// `status` (spec v1 5.5). Com `who`, so a entrada da identidade (v1.1 B).
-    pub fn status_for(&self, who: Option<&str>) -> Value {
-        let mut rec = Map::new();
-        for (name, has_bell) in &self.recipients {
-            if who.is_some_and(|w| w != name) {
-                continue;
-            }
-            let mut pending = 0u64;
-            let mut accepted = 0u64;
-            for m in self.msgs.values().filter(|m| &m.to == name) {
-                match m.state {
-                    State::Registrado => pending += 1,
-                    State::Aceito => accepted += 1,
-                    State::Resultado => {}
-                }
-            }
-            let bell = if !has_bell {
-                "none"
-            } else if self.outstanding.contains_key(name) {
-                "outstanding"
-            } else {
-                "idle_wait"
-            };
-            rec.insert(
-                name.clone(),
-                json!({
-                    "pending": pending,
-                    "accepted": accepted,
-                    "bell": bell,
-                    "last_bell_seq": self.last_bell_seq.get(name).copied(),
-                }),
-            );
-        }
-        json!({"v": 1, "head_seq": self.head(), "recipients": rec})
+    /// `status` agora expõe apenas estatísticas agregadas (spec v1.8 B.0).
+    pub fn status_for(&self, uptime_s: u64, connections: usize) -> Value {
+        self.status_stats(uptime_s, connections)
     }
 }
 

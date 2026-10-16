@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 use crate::auth;
 use crate::bell;
 use crate::binding::{self, Binding, Mux, Registry, TTL};
+use crate::blobs::BlobManager;
 use crate::config::Config;
 use crate::protocol::{self, ApiError, MAX_LINE};
 use crate::store::{Store, msg_json};
@@ -35,6 +36,7 @@ const AUTH_LOCK: Duration = Duration::from_secs(300);
 
 /// Teto do mapa de pids (spec F.3).
 const PID_CAP: usize = 4096;
+static NEXT_CONN: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Default)]
 struct PidAuth {
@@ -76,9 +78,12 @@ fn prune_pids(m: &mut HashMap<i32, PidAuth>, now: Instant) {
 
 pub struct Shared {
     pub store: Mutex<Store>,
+    pub blobs: Mutex<BlobManager>,
     pub bindings: Mutex<Registry>,
     pub cfg: Config,
     pub auth_path: PathBuf,
+    pub connections: Arc<AtomicUsize>,
+    pub started_at: Instant,
     pids: Mutex<HashMap<i32, PidAuth>>,
 }
 
@@ -89,6 +94,7 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Estado por conexao: identidade autenticada, falhas de `auth` e cursor de `events.resume`.
 struct Conn {
     identity: Option<String>,
+    connection: u64,
     failures: usize,
     cursor: Option<u64>,
     receipts: bool,
@@ -108,6 +114,7 @@ impl Drop for ActiveGuard {
 pub fn run(
     cfg: Config,
     store: Store,
+    blobs: BlobManager,
     socket: &Path,
     auth_path: PathBuf,
     shutdown: Arc<AtomicBool>,
@@ -123,11 +130,15 @@ pub fn run(
         .set_nonblocking(true)
         .map_err(|e| format!("nao configurei o socket: {e}"))?;
 
+    let active = Arc::new(AtomicUsize::new(0));
     let shared = Arc::new(Shared {
         store: Mutex::new(store),
+        blobs: Mutex::new(blobs),
         bindings: Mutex::new(Registry::default()),
         cfg,
         auth_path,
+        connections: Arc::clone(&active),
+        started_at: Instant::now(),
         pids: Mutex::new(HashMap::new()),
     });
     let bell_handle = if shared.cfg.recipients.values().any(|d| d.is_bell()) {
@@ -141,13 +152,13 @@ pub fn run(
     let binding_shutdown = Arc::clone(&shutdown);
     let binding_handle =
         thread::spawn(move || binding::maintain(&binding_shared, &binding_shutdown));
+    let blob_handle = start_blob_janitor(Arc::clone(&shared), Arc::clone(&shutdown));
 
     println!("chatd: ready");
     let _ = io::stdout().flush();
 
     // SAFETY: getuid nao recebe argumentos e nao falha.
     let server_uid = unsafe { libc::getuid() };
-    let active = Arc::new(AtomicUsize::new(0));
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -190,8 +201,29 @@ pub fn run(
         let _ = h.join();
     }
     let _ = binding_handle.join();
+    let _ = blob_handle.join();
     let _ = fs::remove_file(socket);
     Ok(())
+}
+
+fn start_blob_janitor(shared: Arc<Shared>, shutdown: Arc<AtomicBool>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            for _ in 0..60 {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let mut emit = |kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                lock(&shared.store).blob_event(kind, fields)
+            };
+            lock(&shared.blobs).cleanup_tick(&mut emit);
+        }
+    })
 }
 
 /// uid e pid do outro lado do socket (SO_PEERCRED).
@@ -253,6 +285,7 @@ fn serve_conn(mut stream: UnixStream, shared: &Shared, shutdown: &AtomicBool, ui
     }
     let mut conn = Conn {
         identity: None,
+        connection: NEXT_CONN.fetch_add(1, Ordering::Relaxed) as u64,
         failures: 0,
         cursor: None,
         receipts: false,
@@ -338,10 +371,16 @@ fn push_events(
                     ev.get("type").and_then(Value::as_str),
                     Some("auth_failed" | "denied" | "bound" | "unbound")
                 );
+                let blob_event = ev
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.starts_with("blob_"));
                 let output = if internal {
                     None
                 } else if receipts {
                     who.and_then(|w| st.receipt_event(&ev, w))
+                } else if blob_event {
+                    who.filter(|w| st.visible(&ev, w)).map(|_| ev)
                 } else if who.is_none_or(|w| st.visible(&ev, w)) {
                     Some(ev)
                 } else {
@@ -373,7 +412,7 @@ fn handle_line(line: &[u8], shared: &Shared, conn: &mut Conn) -> (Value, bool) {
         if req.method == "auth" {
             return auth_step(&req, shared, conn);
         }
-        if conn.identity.is_none() {
+        if req.method != "status" && conn.identity.is_none() {
             return (
                 error_reply(req.id.clone(), &ApiError::unauthenticated()),
                 false,
@@ -570,12 +609,14 @@ fn dispatch(
 ) -> Result<Value, ApiError> {
     let Conn {
         identity,
+        connection,
         cursor,
         receipts: conn_receipts,
         peer_pid,
         ..
     } = conn;
     let who = identity.as_deref();
+    let connection = *connection;
     let peer_pid = *peer_pid;
     if !protocol::METHODS.contains(&method) {
         return Err(ApiError::new(
@@ -584,6 +625,22 @@ fn dispatch(
         ));
     }
     protocol::check_version(p)?;
+    if method == "status" {
+        protocol::reject_unknown(p, &[])?;
+        let st = lock(&shared.store);
+        return Ok(st.status_for(
+            shared.started_at.elapsed().as_secs(),
+            shared.connections.load(Ordering::SeqCst),
+        ));
+    }
+    if method == "mailbox.counts" {
+        protocol::reject_unknown(p, &["to"])?;
+        let who = who.ok_or_else(ApiError::unauthenticated)?;
+        return Ok(lock(&shared.store).mailbox_counts_for(who));
+    }
+    if method.starts_with("blob.") {
+        return dispatch_blob(method, p, shared, who, connection);
+    }
     match method {
         "agent.bind" => bind_agent(p, shared, who, peer_pid),
         "message.send" => {
@@ -695,10 +752,57 @@ fn dispatch(
             *cursor = Some(last);
             Ok(json!({"v": 1, "last_seq": last, "head_seq": head}))
         }
-        _ => {
-            protocol::reject_unknown(p, &[])?;
-            Ok(lock(&shared.store).status_for(who))
+        _ => Err(ApiError::new("method_not_found", "metodo desconhecido")),
+    }
+}
+
+fn dispatch_blob(
+    method: &str,
+    p: &Map<String, Value>,
+    shared: &Shared,
+    who: Option<&str>,
+    connection: u64,
+) -> Result<Value, ApiError> {
+    let who = who
+        .filter(|_| shared.cfg.auth_required)
+        .ok_or_else(ApiError::unauthenticated)?;
+    let mut blobs = lock(&shared.blobs);
+    match method {
+        "blob.put.begin" => {
+            let to = protocol::opt_str(p, "to")?.unwrap_or("");
+            let known = shared.cfg.recipients.contains_key(to);
+            let mut emit = |kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                lock(&shared.store).blob_event(kind, fields)
+            };
+            blobs.begin(who, connection, p, known, &mut emit)
         }
+        "blob.put.chunk" => blobs.chunk(who, connection, p),
+        "blob.put.end" => {
+            let mut emit = |kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                lock(&shared.store).blob_event(kind, fields)
+            };
+            blobs.end(who, connection, p, &mut emit)
+        }
+        "blob.get" => {
+            let mut emit = |kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                lock(&shared.store).blob_event(kind, fields)
+            };
+            blobs.get(who, p, &mut emit)
+        }
+        "blob.rm" => {
+            let mut emit = |kind: &'static str, fields: Vec<(&'static str, Value)>| {
+                lock(&shared.store).blob_event(kind, fields)
+            };
+            blobs.remove(who, p, &mut emit)
+        }
+        "blob.list" => {
+            let mut emit = |kind, fields| lock(&shared.store).blob_event(kind, fields);
+            blobs.list(who, p, &mut emit)
+        }
+        _ => Err(ApiError::new(
+            "method_not_found",
+            "metodo de blob desconhecido",
+        )),
     }
 }
 

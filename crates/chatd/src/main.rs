@@ -3,6 +3,7 @@
 mod auth;
 mod bell;
 mod binding;
+mod blobs;
 mod client;
 mod config;
 mod hash;
@@ -20,8 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 const USAGE: &str = "uso: chatd serve --state-dir DIR --config FILE [--socket PATH]\n     \
-chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [--thread ID] [--id ID] [--ref t:v]... [--keep-open] [--json]\n     \
-chatd inbox [--as N] [--after SEQ] [--all] [--take] [--ids] [--json]\n     \
+chatd send [--from N] --to N --kind K --subject T (--body T | --body-file F|-) [--attach FILE] [--thread ID] [--id ID] [--ref t:v]... [--keep-open] [--json]\n     \
+chatd inbox [--as N] [--after SEQ] [--all] [--take] [--ids] [--count] [--json]\n     \
+chatd put FILE --to N [--name N] [--ttl DUR] [--json] | get BLOB [--out PATH|-] [--consume] | rm BLOB | ls [--json]\n     \
 chatd ack --id ID [--as N] --stage aceito|resultado [--result R] [--note T]\n     \
 chatd watch [--as N] [--from-start] [--receipts]\n     \
 chatd show --id ID [--as N] [--json]\n     \
@@ -177,6 +179,10 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "show" => client::show(rest),
         "bind" => client::bind(rest),
         "status" => client::status(rest),
+        "put" => client::put(rest),
+        "get" => client::get(rest),
+        "rm" => client::rm(rest),
+        "ls" => client::ls(rest),
         "whoami" => client::whoami(rest),
         "log" => client::log(rest),
         "stale" => stale::run(rest),
@@ -218,7 +224,10 @@ fn serve(args: &[String]) -> Result<(), Failure> {
         .iter()
         .map(|(n, d)| (n.clone(), d.is_bell()))
         .collect();
-    let st = store::Store::open(&state_dir, recipients).map_err(Failure::Run)?;
+    let mut st = store::Store::open(&state_dir, recipients).map_err(Failure::Run)?;
+    let mut blobs = blobs::BlobManager::open(&state_dir, st.blobs.values().cloned().collect())
+        .map_err(Failure::Run)?;
+    blobs.reconcile(&mut st).map_err(Failure::Run)?;
     let auth_path = state_dir.join(auth::AUTH_FILE);
-    server::run(cfg, st, &socket, auth_path, shutdown).map_err(Failure::Run)
+    server::run(cfg, st, blobs, &socket, auth_path, shutdown).map_err(Failure::Run)
 }
