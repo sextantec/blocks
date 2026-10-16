@@ -1,6 +1,6 @@
 //! Log append-only (`log.jsonl`), dobra dos eventos, recuperacao de partida e trava (spec v1 6 e v1.1).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -64,6 +64,7 @@ pub struct BlobRecord {
     pub sha256: String,
     pub created_at: String,
     pub ttl_s: u64,
+    pub read_by: HashSet<String>,
 }
 
 /// Mensagem no formato do protocolo (spec v1 5.2, com `refs` da v1.1).
@@ -93,6 +94,34 @@ pub fn msg_json(m: &Msg) -> Value {
 
 pub fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+pub(crate) fn sliding_rate_available(
+    times: &mut VecDeque<Instant>,
+    now: Instant,
+    limit: usize,
+    window: Duration,
+) -> bool {
+    while times
+        .front()
+        .is_some_and(|t| now.duration_since(*t) >= window)
+    {
+        times.pop_front();
+    }
+    times.len() < limit
+}
+
+pub(crate) fn charge_sliding_rate(
+    times: &mut VecDeque<Instant>,
+    now: Instant,
+    limit: usize,
+    window: Duration,
+) -> bool {
+    if !sliding_rate_available(times, now, limit, window) {
+        return false;
+    }
+    times.push_back(now);
+    true
 }
 
 fn internal(msg: String) -> ApiError {
@@ -448,6 +477,7 @@ impl Store {
                         .get("ttl_s")
                         .and_then(Value::as_u64)
                         .ok_or("ttl_s ausente")?,
+                    read_by: HashSet::new(),
                 };
                 if !protocol::valid_name(&record.owner)
                     || !protocol::valid_name(&record.to)
@@ -484,6 +514,11 @@ impl Store {
                 {
                     return Err("evento blob_got invalido".to_string());
                 }
+                self.blobs
+                    .get_mut(id)
+                    .expect("blob record validated")
+                    .read_by
+                    .insert(by.to_string());
             }
             "blob_removed" | "blob_expired" => {
                 let record = self
@@ -920,21 +955,13 @@ impl Store {
     }
 
     fn check_receipt_rate(&mut self, by: &str) -> Result<(), ApiError> {
-        let now = Instant::now();
         let times = self.receipt_times.entry(by.to_string()).or_default();
-        while times
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
-        {
-            times.pop_front();
-        }
-        if times.len() >= 30 {
+        if !charge_sliding_rate(times, Instant::now(), 30, Duration::from_secs(60)) {
             return Err(ApiError::new(
                 "rate_limited",
                 "limite de recibos por minuto",
             ));
         }
-        times.push_back(now);
         Ok(())
     }
 
@@ -1063,7 +1090,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn recips() -> BTreeMap<String, bool> {
+    pub(super) fn recips() -> BTreeMap<String, bool> {
         [("a".to_string(), false), ("b".to_string(), false)]
             .into_iter()
             .collect()
@@ -1125,5 +1152,66 @@ mod tests {
         )
         .unwrap();
         assert!(Store::open(dir.path(), recips()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod blob_read_replay_tests {
+    use super::*;
+
+    #[test]
+    fn replay_restores_readers_and_removal_clears_blob_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = format!("blob:{}", "a".repeat(32));
+        {
+            let mut store = Store::open(dir.path(), tests::recips()).unwrap();
+            store
+                .blob_event(
+                    "blob_put",
+                    vec![
+                        ("blob", json!(id)),
+                        ("owner", json!("a")),
+                        ("to", json!("b")),
+                        ("size", json!(3)),
+                        ("name", json!("x")),
+                        ("sha256", json!("0".repeat(64))),
+                        ("created_at", json!(now_ts())),
+                        ("ttl_s", json!(3600)),
+                    ],
+                )
+                .unwrap();
+            store
+                .blob_event(
+                    "blob_got",
+                    vec![
+                        ("blob", json!(id)),
+                        ("owner", json!("a")),
+                        ("to", json!("b")),
+                        ("by", json!("a")),
+                        ("offset", json!(0)),
+                        ("length", json!(3)),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let mut store = Store::open(dir.path(), tests::recips()).unwrap();
+        assert!(store.blobs[&id].read_by.contains("a"));
+        store
+            .blob_event(
+                "blob_removed",
+                vec![
+                    ("blob", json!(id)),
+                    ("owner", json!("a")),
+                    ("to", json!("b")),
+                    ("name", json!("x")),
+                    ("reason", json!("requested")),
+                ],
+            )
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(dir.path(), tests::recips()).unwrap();
+        assert!(!store.blobs.contains_key(&id));
     }
 }

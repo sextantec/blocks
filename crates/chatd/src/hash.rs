@@ -85,10 +85,11 @@ impl Sha256 {
             self.buffer[self.used..self.used + n].copy_from_slice(&data[..n]);
             self.used += n;
             data = &data[n..];
-            if self.used == 64 {
-                transform(&mut self.h, &self.buffer);
-                self.used = 0;
+            if self.used < 64 {
+                return;
             }
+            transform(&mut self.h, &self.buffer);
+            self.used = 0;
         }
         while data.len() >= 64 {
             let block: &[u8; 64] = data[..64].try_into().expect("fixed block length");
@@ -191,5 +192,26 @@ mod tests {
             streamed.update(part);
         }
         assert_eq!(streamed.finalize_hex(), sha256_hex(&data));
+    }
+
+    #[test]
+    fn d3c_incremental_sha256_preserves_partial_buffers_at_every_cut() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        let data: Vec<u8> = (0..200).map(|n| (n * 37) as u8).collect();
+        let expected = sha256_hex(&data);
+        for cut in 0..=data.len() {
+            let mut hash = Sha256::default();
+            hash.update(&data[..cut]);
+            hash.update(&data[cut..]);
+            assert_eq!(hash.finalize_hex(), expected, "corte em {cut}");
+        }
     }
 }

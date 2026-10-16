@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 
 use crate::hash::Sha256;
 use crate::protocol::{self, ApiError};
-use crate::store::{BlobRecord, Store, now_ts};
+use crate::store::{BlobRecord, Store, charge_sliding_rate, now_ts, sliding_rate_available};
 
 pub const CHUNK_MAX: usize = 512 * 1024;
 pub const BLOB_MAX: u64 = 8 * 1024 * 1024;
@@ -27,6 +27,8 @@ const UPLOAD_MAX_GLOBAL: usize = 8;
 const UPLOAD_MAX_CHUNKS: u64 = 20;
 const PUT_RATE: usize = 30;
 const PUT_WINDOW: Duration = Duration::from_secs(60);
+const GET_RATE: usize = 600;
+const GET_WINDOW: Duration = Duration::from_secs(60);
 const UPLOAD_IDLE: Duration = Duration::from_secs(120);
 const UPLOAD_LIFETIME: Duration = Duration::from_secs(600);
 const TTL_DEFAULT: u64 = 86_400;
@@ -67,6 +69,7 @@ pub struct BlobManager {
     active: HashMap<String, ActiveBlob>,
     uploads: HashMap<String, Upload>,
     rate: HashMap<String, VecDeque<Instant>>,
+    get_rate: HashMap<String, VecDeque<Instant>>,
 }
 
 fn api(code: &'static str, message: &str) -> ApiError {
@@ -285,6 +288,7 @@ impl BlobManager {
             active: HashMap::new(),
             uploads: HashMap::new(),
             rate: HashMap::new(),
+            get_rate: HashMap::new(),
         };
         for record in records {
             let expires = expiry(&record);
@@ -438,6 +442,37 @@ impl BlobManager {
         Ok(())
     }
 
+    fn record_first_read(
+        &mut self,
+        who: &str,
+        record: &BlobRecord,
+        offset: u64,
+        length: u64,
+        emit: &mut EventSink<'_>,
+    ) -> Result<(), ApiError> {
+        if record.read_by.contains(who) {
+            return Ok(());
+        }
+        emit(
+            "blob_got",
+            vec![
+                ("blob", json!(record.id)),
+                ("owner", json!(record.owner)),
+                ("to", json!(record.to)),
+                ("by", json!(who)),
+                ("offset", json!(offset)),
+                ("length", json!(length)),
+            ],
+        )?;
+        self.active
+            .get_mut(&record.id)
+            .expect("active blob checked")
+            .record
+            .read_by
+            .insert(who.to_string());
+        Ok(())
+    }
+
     fn abort(&mut self, id: &str) {
         if let Some(upload) = self.uploads.remove(id) {
             let c = CString::new(upload.temp_name).expect("generated temporary name");
@@ -480,13 +515,7 @@ impl BlobManager {
         self.expire_due(emit)?;
         let now = Instant::now();
         let rate = self.rate.entry(who.to_string()).or_default();
-        while rate
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= PUT_WINDOW)
-        {
-            rate.pop_front();
-        }
-        if rate.len() >= PUT_RATE {
+        if !sliding_rate_available(rate, now, PUT_RATE, PUT_WINDOW) {
             return Err(api("rate_limited", "limite de put.begin excedido"));
         }
         if self.uploads.values().any(|u| u.owner == who) {
@@ -702,6 +731,7 @@ impl BlobManager {
             sha256: actual,
             created_at,
             ttl_s: upload.ttl_s,
+            read_by: Default::default(),
         };
         if let Err(e) = emit("blob_put", put_fields(&record)) {
             let c = CString::new(id_hex).expect("generated id");
@@ -739,6 +769,21 @@ impl BlobManager {
         if !blob_id(id) {
             return Err(ApiError::invalid("/blob", "id de blob invalido"));
         }
+        let offset = protocol::opt_u64(p, "offset")?.unwrap_or(0);
+        let requested_length = protocol::opt_u64(p, "length")?;
+        if requested_length.is_some_and(|length| length > CHUNK_MAX as u64)
+            || requested_length.is_some_and(|length| offset.checked_add(length).is_none())
+        {
+            return Err(ApiError::invalid("/length", "intervalo de blob invalido"));
+        }
+        if !charge_sliding_rate(
+            self.get_rate.entry(who.to_string()).or_default(),
+            Instant::now(),
+            GET_RATE,
+            GET_WINDOW,
+        ) {
+            return Err(api("rate_limited", "limite de blob.get excedido"));
+        }
         self.expire_due(emit)?;
         let Some(active) = self.active.get(id) else {
             return Err(api("not_found", "blob nao encontrado"));
@@ -747,8 +792,7 @@ impl BlobManager {
             return Err(api("not_found", "blob nao encontrado"));
         }
         let record = active.record.clone();
-        let offset = protocol::opt_u64(p, "offset")?.unwrap_or(0);
-        let length = protocol::opt_u64(p, "length")?
+        let length = requested_length
             .unwrap_or_else(|| (record.size.saturating_sub(offset)).min(CHUNK_MAX as u64));
         if offset > record.size
             || length > CHUNK_MAX as u64
@@ -768,17 +812,7 @@ impl BlobManager {
         let mut data = vec![0; length as usize];
         file.read_exact(&mut data)
             .map_err(|_| api("not_found", "blob nao encontrado"))?;
-        emit(
-            "blob_got",
-            vec![
-                ("blob", json!(id)),
-                ("owner", json!(record.owner)),
-                ("to", json!(record.to)),
-                ("by", json!(who)),
-                ("offset", json!(offset)),
-                ("length", json!(length)),
-            ],
-        )?;
+        self.record_first_read(who, &record, offset, length, emit)?;
         Ok(json!({"v":1,"size":record.size,"offset":offset,"data":base64_encode(&data)}))
     }
 
@@ -976,6 +1010,7 @@ mod tests {
                 sha256: "0".repeat(64),
                 created_at: now_ts(),
                 ttl_s: TTL_DEFAULT,
+                read_by: Default::default(),
             })
             .collect();
         assert_eq!(records.len(), OWNER_MAX_COUNT);
