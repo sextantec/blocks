@@ -324,7 +324,7 @@ fn cenario_grupos(a: &Amb, grupos: &[(&str, i64)]) {
     }
 }
 
-/// Valor do `set-option -g @chatd_stale -- VALOR` do falso (o unico `set-option` da execucao).
+/// Valor do `set-option -g -- @chatd_stale VALOR` do falso (o unico `set-option` da execucao).
 fn valor_do_set_option(f: &Falso) -> Option<String> {
     f.chamadas()
         .into_iter()

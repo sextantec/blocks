@@ -14,7 +14,7 @@ M=[
 ("M01","const CLIENT_LIMIT: usize = 8;","const CLIENT_LIMIT: usize = 9;","limite de clientes 9"),
 ("M02",'"10000",\n                    "-l",\n','"10000",\n',"display-message sem -l (expande # no texto)"),
 ("M03",'"-l",\n                    "--",\n                    line,','"-l",\n                    line,',"display-message sem --"),
-("M04",'"@chatd_stale", "--", status]','"@chatd_stale", status]',"set-option sem --"),
+("M04",'"-g", "--", "@chatd_stale", status]','"-g", "@chatd_stale", status]',"set-option sem --"),
 ("M05","Duration::from_secs(5);\nconst TOTAL","Duration::from_secs(50);\nconst TOTAL","timeout por chamada 50 s"),
 ("M06","TOTAL_LIMIT: Duration = Duration::from_secs(10)","TOTAL_LIMIT: Duration = Duration::from_secs(100)","timeout total 100 s"),
 ("M07","const OUTPUT_LIMIT: usize = 64 * 1024;","const OUTPUT_LIMIT: usize = 64 * 1024 * 1024;","limite de saida 64 MiB"),
@@ -28,7 +28,7 @@ M=[
 ("M15","name.len() <= 64\n","name.len() <= 65\n","nome de cliente 65"),
 ("M16","rows.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));","","sem ordenar por nome"),
 ("M17","if Instant::now() >= call_deadline {\n        return Err(SinkError::Timeout);\n    }","","sem checar prazo total antes de chamar"),
-("M18",'"set-option", "-g", "@chatd_stale"','"set-option", "@chatd_stale"',"set-option sem -g"),
+("M18",'"set-option", "-g", "--"','"set-option", "--"',"set-option sem -g"),
 ]
 env=dict(os.environ,CARGO_TARGET_DIR=TD)
 orig=open(f"{W}/{F}").read()

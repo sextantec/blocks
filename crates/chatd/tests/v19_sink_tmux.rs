@@ -330,7 +330,7 @@ fn paradas(saida: &str) -> Vec<String> {
         .collect()
 }
 
-/// Valor do `set-option -g @chatd_stale -- VALOR` do falso (o unico `set-option` da execucao).
+/// Valor do `set-option -g -- @chatd_stale VALOR` do falso (o unico `set-option` da execucao).
 fn valor_do_set_option(f: &Falso) -> Option<String> {
     f.chamadas()
         .into_iter()
@@ -423,7 +423,7 @@ fn k02_um_parado_grava_valor_exato_e_um_display_message_por_cliente() {
     let c = f.chamadas();
     assert_eq!(
         c[0],
-        vec!["set-option", "-g", "@chatd_stale", "--", "claude 7p 329m"],
+        vec!["set-option", "-g", "--", "@chatd_stale", "claude 7p 329m"],
         "argv do set-option"
     );
     assert_eq!(

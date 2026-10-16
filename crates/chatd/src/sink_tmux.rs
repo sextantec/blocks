@@ -83,7 +83,7 @@ fn set_status(
     match call(
         bin,
         socket,
-        &["set-option", "-g", "@chatd_stale", "--", status],
+        &["set-option", "-g", "--", "@chatd_stale", status],
         deadline,
     ) {
         Ok(output) => {
