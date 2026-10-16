@@ -61,3 +61,14 @@ Ler o estado da thread (`idle`/`active`/`waitingOnApproval`) pelo protocolo do a
 
 ## Instalacao (nao normativa; feita pelo Jabbur, apos a implementacao)
 Binario novo e reinicio do `chatd.service`; no `config.json` do destinatario: `"codex-blocks": {"delivery": "codex-queue", "thread_file": "/home/mjabbur/.local/state/chatd/threads/codex-blocks"}`, mais `"codex_bin": "/home/mjabbur/.local/bin/codex"` e `"codex_versions": ["0.163.0"]`. Cada sessao nova do `codex-blocks` regrava o `thread_file` (hook de inicio ou primeira acao). Sem tipo de evento novo: a volta ao binario anterior continua possivel (a config nova seria recusada pelo binario antigo; manter copia da config anterior).
+
+## Emenda 1 (2026-10-16, depois dos testes independentes; resolve as lacunas apontadas pelo Haiku)
+Fato do codigo que motiva a emenda: `bell_failed` **nao** arma o rearme; so limita o *evento* a 1 por minuto por destinatario (`src/store.rs:1049-1060`); `bell_sent` e que arma `outstanding` (`store.rs:1042-1046`). Sem regra propria, um `codex` que falha seria chamado de novo a cada `bell_poll_ms` (5 s), e um `timeout` depois de a mensagem ter sido aceita geraria uma mensagem (e um turno do modelo) por tentativa.
+
+- **E1 ordem dos passos (secao 3):** (a) validar o `thread_file`; (b) checar a versao; (c) `queue`. Falha em (a) = **nenhuma execucao do `codex`** (nem `--version`); falha em (b) = `queue` nao e chamado.
+- **E2 quebra de linha final:** um unico `\n` final e aceito; `\r\n` ou mais de uma quebra de linha = `thread_file_invalid`.
+- **E3 limite de 64 bytes:** e salvaguarda de leitura (o formato valido tem 36 bytes mais o `\n`); nao decide sozinho.
+- **E4 nova tentativa depois de falha (so em memoria; reinicio do daemon zera):** apos qualquer falha do canal (`thread_file_*`, `codex_version_unsupported`, `spawn_failed`, `queue_failed`) o destinatario nao e tentado de novo antes de 60 s; apos `timeout` (resultado incerto, a mensagem pode ter sido enfileirada) nao e tentado de novo antes de `bell_rearm_s`. Continua valendo o limite de 1 evento `bell_failed` por minuto.
+- **E5 `--version` que nao executa:** `spawn_failed` (ou `timeout` se passar de 5 s), tambem com o limite de 5 s e a saida limitada de 64 KiB; o cache de 10 min so guarda resultados de sucesso.
+- **E6 recusa de config:** como na v1.10: o daemon sai com codigo diferente de zero e nao fica pronto; a mensagem de erro nomeia a chave.
+- **Testes adicionais:** Q19 (apos `queue_failed` nao ha nova chamada em menos de 60 s e ha depois disso, com relogio acelerado ou `bell_poll_ms` pequeno e janela de observacao), Q20 (apos `timeout` nao ha nova chamada antes de `bell_rearm_s`), Q21 (falha em (a) nao executa nem `--version`).
