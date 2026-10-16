@@ -245,8 +245,9 @@ fn token_revogado_deixa_de_valer_sem_reiniciar_o_servidor() {
         cod(&auth_tenta(&a.srv.socket, CODEX, &a.tok(CODEX))),
         "unauthenticated"
     );
+    // status e anonimo (B.0): a revogacao se prova com um metodo autenticado
     assert_eq!(
-        cod(&Conexao::abre(&a.srv.socket).chama("status", json!({"v": 1}))),
+        cod(&Conexao::abre(&a.srv.socket).chama("mailbox.counts", json!({"v": 1}))),
         "unauthenticated"
     );
 }
@@ -266,8 +267,9 @@ fn handshake_com_token_certo_devolve_v_e_name() {
 fn metodos_antes_do_auth_sao_unauthenticated() {
     let a = amb_com(&[CLAUDE]);
     let sock = a.sock();
+    // status NAO entra aqui: e anonimo por design (spec v1.8 B.0), ver o teste abaixo.
     let casos: Vec<(&str, Value)> = vec![
-        ("status", json!({"v": 1})),
+        ("mailbox.counts", json!({"v": 1})),
         ("message.list", json!({"v": 1})),
         ("message.take", json!({"v": 1})),
         (
@@ -280,6 +282,9 @@ fn metodos_antes_do_auth_sao_unauthenticated() {
         let r = Conexao::abre(&sock).chama(metodo, p);
         assert_eq!(cod(&r), "unauthenticated", "metodo {metodo}: {r}");
     }
+    // status sem auth responde ok (so contagens), mesmo com a auth ligada
+    let r = res(&rpc(&sock, "status", json!({"v": 1})));
+    assert_eq!(r["ok"], true, "status anonimo: {r}");
 }
 
 #[test]
@@ -543,17 +548,26 @@ fn events_resume_entrega_so_eventos_da_identidade() {
 #[test]
 fn status_devolve_so_a_propria_entrada() {
     let a = amb_com(&[CLAUDE, CODEX, TERCEIRO]);
+    // status anonimo: so contagens, nenhum nome de agente (spec B.0)
+    let r = res(&rpc(&a.sock(), "status", json!({"v": 1})));
+    assert!(r.get("recipients").is_none(), "status sem recipients: {r}");
+    for nome in [CLAUDE, CODEX, TERCEIRO] {
+        assert!(!r.to_string().contains(nome), "status vazou {nome}: {r}");
+    }
+    // mailbox.counts autenticado: so a caixa da identidade que pergunta
     let mut claude = a.conecta(CLAUDE);
-    let r = res(&claude.chama("status", json!({"v": 1})));
-    let chaves: Vec<String> = r["recipients"]
-        .as_object()
-        .expect("recipients objeto")
-        .keys()
-        .cloned()
-        .collect();
+    let envio = res(&claude.chama(
+        "message.send",
+        msg("pe-1", CLAUDE, CODEX, "AVISO", "s", "b"),
+    ));
+    assert_eq!(envio["state"], "registrado", "{envio}");
+    let do_codex = res(&a.conecta(CODEX).chama("mailbox.counts", json!({"v": 1})));
+    assert_eq!(do_codex["pending"], 1, "caixa do codex: {do_codex}");
+    let do_claude = res(&claude.chama("mailbox.counts", json!({"v": 1})));
+    assert_eq!(do_claude["pending"], 0, "caixa do claude: {do_claude}");
+    let do_terceiro = res(&a.conecta(TERCEIRO).chama("mailbox.counts", json!({"v": 1})));
     assert_eq!(
-        chaves,
-        vec![CLAUDE.to_string()],
-        "status deve mostrar so a identidade: {r}"
+        do_terceiro["pending"], 0,
+        "caixa do terceiro: {do_terceiro}"
     );
 }

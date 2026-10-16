@@ -491,11 +491,24 @@ fn cli_ack_imprime_ok() {
 fn sem_token_com_auth_required_sai_2() {
     let a = amb_com(&[CLAUDE]);
     let sock = s(&a.srv.socket).to_string();
+    // inbox exige identidade; status nao exige (spec B.0), ver o teste abaixo
+    let r = cli_com(
+        &["inbox"],
+        &[("CHATD_AS", CLAUDE), ("CHATD_SOCKET", sock.as_str())],
+    );
+    assert_eq!(r.code, Some(2), "saida: {r:?}");
+}
+
+#[test]
+fn status_sem_token_com_auth_required_sai_0() {
+    let a = amb_com(&[CLAUDE]);
+    let sock = s(&a.srv.socket).to_string();
     let r = cli_com(
         &["status"],
         &[("CHATD_AS", CLAUDE), ("CHATD_SOCKET", sock.as_str())],
     );
-    assert_eq!(r.code, Some(2), "saida: {r:?}");
+    assert_eq!(r.code, Some(0), "saida: {r:?}");
+    assert!(r.stdout.contains("ok true"), "saida: {:?}", r.stdout);
 }
 
 #[test]

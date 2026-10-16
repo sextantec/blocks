@@ -851,20 +851,26 @@ fn conexao_sem_resume_nao_recebe_eventos() {
 // ---------- status ----------
 
 #[test]
-fn status_tem_head_e_campos_por_destinatario() {
+fn status_tem_head_e_estatisticas() {
     let (_d, srv) = sobe_padrao();
     let sock = srv.socket.clone();
     envia_ok(&sock, "st-1", "codex-web", "x");
     let r = res(&rpc(&sock, "status", json!({"v": 1})));
     assert_eq!(r["v"], 1);
+    assert_eq!(r["ok"], true);
     assert_eq!(r["head_seq"], 1);
-    for nome in ["codex-web", "claude-main"] {
-        let d = &r["recipients"][nome];
-        for campo in ["pending", "accepted", "bell", "last_bell_seq"] {
-            assert!(d.get(campo).is_some(), "{nome} sem {campo}: {d}");
-        }
-    }
-    assert_eq!(r["recipients"]["codex-web"]["pending"], 1);
+    assert!(r["version"].is_string(), "version: {r}");
+    assert!(r["uptime_s"].is_u64(), "uptime_s: {r}");
+    assert_eq!(r["messages"]["total"], 1);
+    assert_eq!(r["messages"]["registered"], 1);
+    assert_eq!(r["messages"]["accepted"], 0);
+    assert_eq!(r["messages"]["resulted"], 0);
+    assert!(r["bells"]["sent"].is_u64(), "bells: {r}");
+    assert!(r["bells"]["failed"].is_u64(), "bells: {r}");
+    assert!(r["connections"].is_u64(), "connections: {r}");
+    assert_eq!(r["blobs"]["count"], 0);
+    assert_eq!(r["blobs"]["bytes"], 0);
+    assert!(r.get("recipients").is_none(), "status sem recipients: {r}");
 }
 
 // ---------- erros ----------

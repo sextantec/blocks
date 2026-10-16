@@ -3,8 +3,13 @@ mod common;
 
 use common::*;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
+
+const CLAUDE: &str = "claude-main";
+const CODEX: &str = "codex-web";
 
 // v1.1 (secao C.3): texto fixo e literal, sem nome do destinatario.
 const TEXTO_1: &str = "[chat] 1 pendente(s). Rode: chatd inbox --take";
@@ -15,6 +20,46 @@ fn pausa(ms: u64) {
 
 fn conta_bell_failed(evs: &[Value]) -> usize {
     evs.iter().filter(|e| e["type"] == "bell_failed").count()
+}
+
+/// Como amb_campainha, mas com auth obrigatoria: o estado da campainha so sai pelo
+/// `mailbox.counts` autenticado (spec v1.8 B.0). Devolve os tokens de claude-main e codex-web.
+fn amb_campainha_auth(poll_ms: u64, rearm_s: u64) -> (TempDir, Servidor, Herdr, (String, String)) {
+    let d = tmp();
+    let h = Herdr::novo(d.path());
+    let cfg = escreve_config(d.path(), &config_req_json(&h.bin, poll_ms, rearm_s));
+    let srv = sobe(&d.path().join("state"), &cfg);
+    let tc = token_new(&srv.state, CLAUDE, &d.path().join("claude.tok"));
+    let tx = token_new(&srv.state, CODEX, &d.path().join("codex.tok"));
+    (d, srv, h, (tc, tx))
+}
+
+/// `mailbox.counts` da propria identidade (conexao autenticada como `nome`).
+fn caixa(socket: &Path, nome: &str, token: &str) -> Value {
+    res(&conexao_auth(socket, nome, token).chama("mailbox.counts", json!({"v": 1})))
+}
+
+fn bell_de(socket: &Path, nome: &str, token: &str) -> String {
+    caixa(socket, nome, token)["bell"]
+        .as_str()
+        .unwrap_or("<ausente>")
+        .to_string()
+}
+
+/// AVISO de claude-main para `para`, por conexao autenticada.
+fn envia_claude(socket: &Path, token: &str, id: &str, para: &str, corpo: &str) -> Value {
+    res(&conexao_auth(socket, CLAUDE, token).chama(
+        "message.send",
+        msg(id, CLAUDE, para, "AVISO", "assunto", corpo),
+    ))
+}
+
+/// `message.ack` feito pelo proprio `nome`, por conexao autenticada.
+fn ack_como(socket: &Path, nome: &str, token: &str, id: &str, stage: &str) -> Value {
+    res(&conexao_auth(socket, nome, token).chama(
+        "message.ack",
+        json!({"v": 1, "id": id, "by": nome, "stage": stage}),
+    ))
 }
 
 // ---------- quando toca ----------
@@ -143,18 +188,18 @@ fn texto_conta_as_mensagens_pendentes() {
 
 #[test]
 fn uma_campainha_por_rearm() {
-    let (_d, srv, h) = amb_campainha(50, 600);
+    let (_d, srv, h, (tc, tx)) = amb_campainha_auth(50, 600);
     h.estado("idle");
-    envia_ok(&srv.socket, "ra-1", "codex-web", "a");
+    envia_claude(&srv.socket, &tc, "ra-1", CODEX, "a");
     assert!(h.espera_chamadas(1, Duration::from_secs(5)), "nao tocou");
-    envia_ok(&srv.socket, "ra-2", "codex-web", "b");
+    envia_claude(&srv.socket, &tc, "ra-2", CODEX, "b");
     pausa(1000);
     assert_eq!(
         h.chamadas().len(),
         1,
         "sem rearm nao pode haver segunda campainha"
     );
-    assert_eq!(bell(&srv.socket, "codex-web"), "outstanding");
+    assert_eq!(bell_de(&srv.socket, CODEX, &tx), "outstanding");
 }
 
 #[test]
@@ -174,22 +219,22 @@ fn rearm_curto_permite_nova_campainha_sem_recibo() {
 
 #[test]
 fn aceite_volta_a_idle_wait_e_nova_mensagem_toca() {
-    let (_d, srv, h) = amb_campainha(50, 600);
+    let (_d, srv, h, (tc, tx)) = amb_campainha_auth(50, 600);
     h.estado("idle");
-    envia_ok(&srv.socket, "av-1", "codex-web", "a");
+    envia_claude(&srv.socket, &tc, "av-1", CODEX, "a");
     assert!(h.espera_chamadas(1, Duration::from_secs(5)), "nao tocou");
     assert!(
-        espera(Duration::from_secs(3), || bell(&srv.socket, "codex-web")
+        espera(Duration::from_secs(3), || bell_de(&srv.socket, CODEX, &tx)
             == "outstanding"),
         "esperava outstanding"
     );
-    ack_ok(&srv.socket, "av-1", "codex-web", "aceito");
+    ack_como(&srv.socket, CODEX, &tx, "av-1", "aceito");
     assert!(
-        espera(Duration::from_secs(3), || bell(&srv.socket, "codex-web")
+        espera(Duration::from_secs(3), || bell_de(&srv.socket, CODEX, &tx)
             == "idle_wait"),
         "aceite deve voltar a idle_wait"
     );
-    envia_ok(&srv.socket, "av-2", "codex-web", "b");
+    envia_claude(&srv.socket, &tc, "av-2", CODEX, "b");
     assert!(
         h.espera_chamadas(2, Duration::from_secs(5)),
         "nova mensagem depois do aceite deveria tocar"
@@ -198,18 +243,18 @@ fn aceite_volta_a_idle_wait_e_nova_mensagem_toca() {
 
 #[test]
 fn resultado_direto_de_registrado_tambem_volta_a_idle_wait() {
-    let (_d, srv, h) = amb_campainha(50, 600);
+    let (_d, srv, h, (tc, tx)) = amb_campainha_auth(50, 600);
     h.estado("idle");
-    envia_ok(&srv.socket, "rd-1", "codex-web", "a");
+    envia_claude(&srv.socket, &tc, "rd-1", CODEX, "a");
     assert!(h.espera_chamadas(1, Duration::from_secs(5)), "nao tocou");
     assert!(
-        espera(Duration::from_secs(3), || bell(&srv.socket, "codex-web")
+        espera(Duration::from_secs(3), || bell_de(&srv.socket, CODEX, &tx)
             == "outstanding"),
         "esperava outstanding"
     );
-    ack_ok(&srv.socket, "rd-1", "codex-web", "resultado");
+    ack_como(&srv.socket, CODEX, &tx, "rd-1", "resultado");
     assert!(
-        espera(Duration::from_secs(3), || bell(&srv.socket, "codex-web")
+        espera(Duration::from_secs(3), || bell_de(&srv.socket, CODEX, &tx)
             == "idle_wait"),
         "quando todas saem de registrado, volta a idle_wait"
     );
@@ -217,25 +262,26 @@ fn resultado_direto_de_registrado_tambem_volta_a_idle_wait() {
 
 #[test]
 fn estado_inicial_da_campainha() {
-    let (_d, srv, _h) = amb_campainha(50, 600);
-    assert_eq!(bell(&srv.socket, "codex-web"), "idle_wait");
-    assert_eq!(bell(&srv.socket, "claude-main"), "none");
+    let (_d, srv, _h, (tc, tx)) = amb_campainha_auth(50, 600);
+    assert_eq!(bell_de(&srv.socket, CODEX, &tx), "idle_wait");
+    assert_eq!(bell_de(&srv.socket, CLAUDE, &tc), "none");
 }
 
 // ---------- eventos e status ----------
 
 #[test]
 fn bell_sent_aparece_no_stream_e_last_bell_seq_confere() {
-    let (_d, srv, h) = amb_campainha(50, 600);
-    let mut c = Conexao::abre(&srv.socket);
+    let (_d, srv, h, (tc, tx)) = amb_campainha_auth(50, 600);
+    // bell_sent so e visivel ao destinatario: o stream e lido como codex-web
+    let mut c = conexao_auth(&srv.socket, CODEX, &tx);
     res(&c.chama("events.resume", json!({"v": 1, "last_seq": 0})));
     h.estado("idle");
-    envia_ok(&srv.socket, "bs-1", "codex-web", "a");
+    envia_claude(&srv.socket, &tc, "bs-1", CODEX, "a");
     let evs = c.eventos_ate(Duration::from_secs(5), |e| e["type"] == "bell_sent");
     let ev = evs.last().expect("evento bell_sent");
     assert_eq!(ev["type"], "bell_sent");
-    let st = status(&srv.socket);
-    assert_eq!(st["recipients"]["codex-web"]["last_bell_seq"], ev["seq"]);
+    let st = caixa(&srv.socket, CODEX, &tx);
+    assert_eq!(st["last_bell_seq"], ev["seq"]);
 }
 
 #[test]

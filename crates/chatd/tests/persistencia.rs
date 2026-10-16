@@ -87,14 +87,22 @@ fn reinicio_devolve_campainha_a_idle_wait() {
     let d = tmp();
     let h = Herdr::novo(d.path());
     h.estado("working");
-    let cfg = escreve_config(d.path(), &config(&h.bin, 50, 600));
+    let cfg = escreve_config(d.path(), &config_req_json(&h.bin, 50, 600));
     let st = d.path().join("state");
     let mut srv = sobe(&st, &cfg);
-    envia_ok(&srv.socket, "rb-1", "codex-web", "x");
+    // auth obrigatoria: o estado da campainha so sai do mailbox.counts autenticado (spec B.0)
+    let tc = token_new(&st, "claude-main", &d.path().join("claude.tok"));
+    let tx = token_new(&st, "codex-web", &d.path().join("codex.tok"));
+    res(&conexao_auth(&srv.socket, "claude-main", &tc).chama(
+        "message.send",
+        msg("rb-1", "claude-main", "codex-web", "AVISO", "s", "x"),
+    ));
     para_ok(&mut srv);
     drop(srv);
     let srv2 = sobe(&st, &cfg);
-    assert_eq!(bell(&srv2.socket, "codex-web"), "idle_wait");
+    let caixa =
+        res(&conexao_auth(&srv2.socket, "codex-web", &tx).chama("mailbox.counts", json!({"v": 1})));
+    assert_eq!(caixa["bell"], "idle_wait");
     assert!(
         h.chamadas().is_empty(),
         "com estado working nao pode haver campainha"

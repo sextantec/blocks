@@ -571,12 +571,21 @@ fn ack_id_inexistente_sai_1_unknown_message() {
 // ---------- status ----------
 
 #[test]
-fn status_texto_sai_0_e_cita_os_destinatarios() {
+fn status_texto_sai_0_e_traz_estatisticas() {
     let (_d, srv) = sobe_padrao();
     let r = cli(&["status", "--socket", s(&srv.socket)]);
     assert_eq!(r.code, Some(0), "saida: {r:?}");
-    assert!(r.stdout.contains("codex-web"), "saida: {:?}", r.stdout);
-    assert!(r.stdout.contains("claude-main"), "saida: {:?}", r.stdout);
+    assert!(r.stdout.contains("ok true"), "saida: {:?}", r.stdout);
+    assert!(r.stdout.contains("head_seq "), "saida: {:?}", r.stdout);
+    assert!(
+        r.stdout.contains("mensagens total="),
+        "saida: {:?}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("blobs count="), "saida: {:?}", r.stdout);
+    // spec B.0: nenhum nome de agente ou destinatario na saida
+    assert!(!r.stdout.contains("codex-web"), "saida: {:?}", r.stdout);
+    assert!(!r.stdout.contains("claude-main"), "saida: {:?}", r.stdout);
 }
 
 #[test]
@@ -587,16 +596,23 @@ fn status_json_tem_a_estrutura_da_spec() {
     let r = cli(&["status", "--json", "--socket", sock]);
     assert_eq!(r.code, Some(0), "saida: {r:?}");
     let v: Value = serde_json::from_str(r.stdout.trim()).expect("JSON do status");
+    assert_eq!(v["v"], 1);
+    assert_eq!(v["ok"], true);
+    assert!(v["version"].is_string(), "version: {v}");
+    assert!(v["uptime_s"].is_u64(), "uptime_s: {v}");
     assert_eq!(v["head_seq"], 1);
-    let cw = &v["recipients"]["codex-web"];
-    assert_eq!(cw["pending"], 1);
-    assert_eq!(cw["accepted"], 0);
-    assert!(cw["bell"].is_string(), "bell: {cw}");
-    assert!(v["recipients"]["claude-main"].is_object());
-    assert!(
-        cw.get("last_bell_seq").is_some(),
-        "last_bell_seq ausente: {cw}"
-    );
+    assert_eq!(v["messages"]["total"], 1);
+    assert_eq!(v["messages"]["registered"], 1);
+    assert_eq!(v["messages"]["accepted"], 0);
+    assert_eq!(v["messages"]["resulted"], 0);
+    assert!(v["bells"]["sent"].is_u64(), "bells: {v}");
+    assert!(v["bells"]["failed"].is_u64(), "bells: {v}");
+    assert!(v["connections"].is_u64(), "connections: {v}");
+    assert_eq!(v["blobs"]["count"], 0);
+    assert_eq!(v["blobs"]["bytes"], 0);
+    // sem nomes de agente/destinatario/perfil/painel
+    assert!(v.get("recipients").is_none(), "status sem recipients: {v}");
+    assert!(!r.stdout.contains("codex-web"), "vazou nome: {}", r.stdout);
 }
 
 // ---------- resolucao do socket ----------
