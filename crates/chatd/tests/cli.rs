@@ -496,7 +496,7 @@ fn ack_aceito_depois_resultado_refused_muda_o_estado() {
         "ak-1",
         "codex-web",
         "resultado",
-        &["--result", "refused"],
+        &["--result", "refused", "--note", "recusado no teste"],
     );
     assert_eq!(r.code, Some(0), "saida: {r:?}");
     let ms = mensagens_json(&inbox_cli(sock, &["--all", "--json"]).stdout);
