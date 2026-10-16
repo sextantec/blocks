@@ -1241,7 +1241,7 @@ fn c07b_terceiro_nao_pode_nem_com_as_do_destinatario() {
     // `--as B` na CLI com o token de C: o daemon autentica C e o resultado nao muda.
     let st = cli_id(
         &a,
-        B,
+        C,
         &[
             "ack",
             "--id",
