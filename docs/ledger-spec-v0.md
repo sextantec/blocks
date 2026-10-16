@@ -20,7 +20,7 @@ Origin: requested by the owner on 2026-10-15. Bloco do lego: um binario pequeno,
 3. **measured**: tokens/custo vindos da resposta da API (OpenRouter e DeepSeek via Pi).
 
 ## Integracoes (depois do v0)
-`chatd`: alerta de expiracao vira mensagem para o Jabbur/Claude; `agentd`: relaciona consumo ao agente e a tarefa; `journald`: cada gasto aponta para a tarefa e para a autorizacao (`grantd`).
+`chatd`: alerta de expiracao vira mensagem para o Jabbur/Claude; `agentd`: relaciona consumo ao agente e a tarefa; `memd`: cada gasto aponta para a pendencia (tarefa); `grantd`: para a concessao que autorizou o gasto.
 
 ## Aceite do v0
 Testes independentes (Haiku), mutacao, fmt/clippy, e um piloto: carregar as 7 rotas reais com saldo e validade informados pelo Jabbur e rodar `ledger alerts`.
