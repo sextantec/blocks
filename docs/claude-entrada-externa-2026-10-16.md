@@ -7,8 +7,8 @@ Regra 13: o fonte do CLI do Claude Code NAO esta disponivel. O repositorio publi
 | --- | --- |
 | ocioso | `SendMessage` entregou na caixa de entrada; a sessao iniciou turno sozinha (tela mostrou turno em andamento 8 s depois) e respondeu `recebido` por SendMessage |
 | ocupado (rodando `sleep 20`) | a mensagem B foi aceita durante o turno; chegaram `A-ok` e depois `B-ok`, **na ordem de envio**, sem perda |
-| rascunho no compositor | nao testado |
-| aprovacao aberta | nao testado |
+| rascunho no compositor (16:11, painel `w9:p1` em manual mode, rascunho `rascunho do Jabbur, nao apague,` sem Enter) | a mensagem chegou, a sessao iniciou turno sozinha, respondeu `rascunho-ok` em ~4 s e o **rascunho ficou intacto** no compositor; a mensagem aparece como linha `Message from @NOME: ...` na conversa |
+| aprovacao aberta (manual mode; `sleep 3; echo` roda sem pedir, `python3 -c ...` abre dialogo de aprovacao) | com o dialogo aberto por mais de 60 s, o painel ficou `blocked` no herdr, a mensagem E apareceu na conversa mas **nao respondeu nem destravou o dialogo**; o turno ficou parado ate o Jabbur escolher "1. Yes"; depois chegaram `D-ok` e `E-ok` **na ordem de envio**, sem perda |
 
 Descobrir pares: `ListAgents` (nome, estado idle/busy, interativa/bg). Ao enviar: `SendMessage` com `to` = nome. Aviso opcional de ociosidade (`notify_when_idle`). A resposta chega com `from=uds:/run/user/1000/cc-socks/PID.sock` e `from-mode`.
 
