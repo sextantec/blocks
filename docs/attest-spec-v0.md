@@ -63,6 +63,12 @@ Hoje "o `codex-blocks` implementou, o Haiku escreveu os testes sem ver o codigo,
 16. `--result` diferente de `pass|fail` = saida 2.
 17. `output_bytes` e o tamanho exato, em bytes, de stdout+stderr do comando; `effort` e opcional.
 
+## Emendas apos a consulta ao Astra (2026-10-16)
+18. **Nao poluir o repositorio:** o `tree` e calculado com diretorio de objetos temporario (`GIT_OBJECT_DIRECTORY` apontando para um diretorio temporario 0700 e `GIT_ALTERNATE_OBJECT_DIRECTORIES` para o `objects/` real), de modo que `git add -A` **nao grava nenhum objeto** no `.git` real (um arquivo nao ignorado com segredo, como um `.env` esquecido, nao pode ficar guardado como objeto). O temporario e removido ao fim, inclusive em erro. **A22:** a contagem de objetos do `.git` real (`git count-objects -v`, campos `count` e `in-pack`) e igual antes e depois de `run`, `note`, `check` e `footer`, mesmo com um arquivo nao ignorado novo na arvore.
+19. **Arvore antes e depois:** `run` registra `tree_before` (antes de rodar o comando) e `tree` (**depois**, a versao que sera comitada); se diferem, `mutated: true`. O `check`, o `footer` e a politica usam `tree`. **A23:** um comando que altera um arquivo (ex.: `sh -c 'echo x >> arq'`) grava `tree_before != tree` e `mutated: true`; um comando que nao altera grava os dois iguais e `mutated: false`. `note` grava so `tree`.
+20. **`argv` e gravado:** nunca passe segredo em argumento. O `attest` nao detecta segredo (limite declarado); o hash da arvore nao grava conteudo.
+21. **Limites declarados (nao sao defeitos):** `independent_of` compara nomes de agente, nao prova isolamento real entre eles; `authorized_by` e declaracao, nao controle preventivo; a politica de exemplo nao exige mutacao (o time pode acrescentar o passo `mutation`).
+
 ## Fora da v0
 Assinatura/chave, daemon, integracao automatica com `chatd` ou git hook, cota (isso e o `ledger`), `resume` derivado (o `show`/`check` sao a base), `grantd`.
 
