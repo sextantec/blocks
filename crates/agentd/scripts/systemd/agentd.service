@@ -1,0 +1,24 @@
+# Unit de usuario; instalar separadamente com scripts/systemd/instala-unit.sh.
+[Unit]
+Description=agentd: observador local do estado dos agentes
+After=default.target
+
+[Service]
+Type=simple
+# RuntimeDirectory fica em %t/agentd e e removido pelo systemd quando a unit para.
+RuntimeDirectory=agentd
+# O socket contem estado privado do usuario; somente o dono pode atravessar/ler o diretorio.
+RuntimeDirectoryMode=0700
+# %t/agentd corresponde ao RuntimeDirectory acima; config e binario seguem os caminhos pedidos.
+ExecStart=%h/.local/bin/agentd serve --config %h/.config/agentd/config.json --socket %t/agentd/agentd.sock
+Restart=on-failure
+RestartSec=2
+# Impede o processo de ganhar privilegios adicionais por execucao de binarios setuid.
+NoNewPrivileges=yes
+# tmux usa /tmp/tmux-UID; isolar /tmp quebraria o socket de controle do tmux.
+PrivateTmp=no
+# Arquivos criados pela unit ficam privados para este usuario.
+UMask=0077
+
+[Install]
+WantedBy=default.target
