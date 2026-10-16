@@ -32,6 +32,8 @@ Hoje o `chatd stale` detecta `[chat] parado: claude 7 pendente(s), mais antiga 3
 8. **`--tmux-bin`/`--tmux-socket` sem o sink `tmux`** saem 2 (K11d/K11e); a prova de que as opcoes existem quando o sink esta ligado e K11a/K13.
 
 ## Parte B (PROPOSTA): portao do `agentd` na campainha tmux (muda o daemon)
+
+> **RETIRADA como caminho (2026-10-16).** Apos a consulta ao Opus e ao Astra (os dois: o estado vem da tela e ha corrida entre conferir e digitar, entao o `agentd` nao basta como autoridade para digitar), a campainha tmux deixa de digitar por padrao (spec v1.10) e esta Parte B nao sera implementada. Fica como registro do desenho considerado.
 1. **Pre-requisito no `agentd` (rev5.4, aditivo):** `Agente` ganha `pane` (id do painel observado, ex.: `%7`, ou `null`). Backlog do agentd.
 2. **Config** do `chatd` (campo desconhecido segue recusado): `"agentd": {"bin": "agentd", "socket": "/abs"}` e, por destinatario, `"agentd_id"` opcional (padrao: o nome do destinatario). `"bell_tmux_dry_run"` (padrao **true**).
 3. **Regra** (so para `Mux::Tmux`; herdr inalterado): antes do `send-keys`, o daemon roda `agentd get ID --json --socket S` (`argv`, sem shell, 5 s, 64 KiB) e so digita se **todas**: `state == "idle"`; `input == "empty"`; `origin` em `configured|mark`; sem marcas `stale`, `error`, `idle_unconfirmed`; e `pane` igual ao painel **ligado e verificado** por `chatd bind` (a ligacao prova o dono pelo `pid`; o `agentd` prova o estado do mesmo painel).
