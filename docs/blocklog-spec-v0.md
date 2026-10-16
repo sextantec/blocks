@@ -42,7 +42,7 @@ Igualdade = mesmo `agent`, mesmo `id`, mesmo `h`. O chamador define a carga cano
 Toda E/S passa por tres interfaces injetaveis (secao 8): `LogFile`, `Storage` e `Clock`. A versao real usa a std e `flock`; os testes usam falhas injetadas (erro em `write_all`, escrita curta, erro em `sync_data`, `ENOSPC`, relogio regressivo). Nao ha codigo de teste no caminho de producao alem dessas interfaces.
 
 ## 8. API publica (Rust; assinaturas normativas, os testes compilam contra elas)
-Crate `blocklog`, edicao 2021, sem `unsafe` fora do `flock` (`libc`). Tipos de JSON: `serde_json::Value`; instante: `chrono::DateTime<chrono::Utc>`.
+Crate `blocklog` (biblioteca; edicao e toolchain do workspace), sem `unsafe` fora do `flock` (`libc`). Tipos de JSON: `serde_json::Value`; instante: `chrono::DateTime<chrono::Utc>`.
 ```rust
 pub trait LogFile: Send {                       // uma instancia = o log.jsonl aberto
     fn read_all(&mut self) -> std::io::Result<Vec<u8>>;
