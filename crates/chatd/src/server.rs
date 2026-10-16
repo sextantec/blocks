@@ -587,10 +587,13 @@ fn dispatch(
     match method {
         "agent.bind" => bind_agent(p, shared, who, peer_pid),
         "message.send" => {
-            let sp = protocol::parse_send(p)?;
+            let mut sp = protocol::parse_send(p)?;
             let from = protocol::resolve(sp.from.clone(), who, "/from")?;
             protocol::check_name(&from, "/from")?;
             protocol::check_name(&sp.to, "/to")?;
+            if sp.due_s.is_none() {
+                sp.due_s = shared.cfg.due_defaults.get(&sp.kind).copied();
+            }
             let (m, dup, closed) = lock(&shared.store).send(&from, &sp)?;
             Ok(json!({
                 "v": 1,
@@ -637,7 +640,25 @@ fn dispatch(
         }
         "message.ack" => {
             let ap = protocol::parse_ack(p)?;
-            let by = protocol::resolve(ap.by.clone(), who, "/by")?;
+            if ap.stage == "bloqueado" && (!shared.cfg.auth_required || who.is_none()) {
+                return Err(ApiError::unauthenticated());
+            }
+            if ap.stage == "bloqueado" && !shared.cfg.blocked_receipts {
+                return Err(ApiError::new(
+                    "feature_disabled",
+                    "blocked receipts desativados",
+                ));
+            }
+            if ap.stage == "bloqueado"
+                && ap.by.as_deref().is_some_and(|claimed| Some(claimed) != who)
+            {
+                return Err(ApiError::new("not_found", "mensagem nao encontrada"));
+            }
+            let by = if ap.stage == "bloqueado" {
+                who.expect("bloqueado exige autenticacao").to_string()
+            } else {
+                protocol::resolve(ap.by.clone(), who, "/by")?
+            };
             protocol::check_name(&by, "/by")?;
             let (m, dup) = lock(&shared.store).ack(&by, &ap)?;
             let mut v = msg_json(&m);

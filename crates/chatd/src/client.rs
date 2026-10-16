@@ -470,9 +470,11 @@ fn open(o: &ClientOpts, name: Option<&str>) -> Result<Session, Failure> {
     let socket = socket_path(o)?;
     let mut s = Session::connect(&socket).map_err(rpc_fail)?;
     s.has_token = tok.is_some();
-    if let Some((n, t)) = auth {
-        s.call("auth", json!({"v": 1, "name": n, "token": t}))
-            .map_err(rpc_fail)?;
+    if let Some((n, t)) = auth
+        && let Err(error) = s.call("auth", json!({"v": 1, "name": n, "token": t}))
+        && !matches!(&error, Rpc::Server { code, .. } if code == "method_not_found")
+    {
+        return Err(rpc_fail(error));
     }
     Ok(s)
 }
@@ -547,6 +549,7 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
         "thread",
         "id",
         "ref",
+        "due",
     ]);
     let o = client_opts(args, &vals, &["json", "keep-open"])?;
     let from = identity(&o, "from")?;
@@ -598,6 +601,9 @@ pub fn send(args: &[String]) -> Result<(), Failure> {
     }
     if o.flag("keep-open") {
         params.insert("keep_open".into(), json!(true));
+    }
+    if let Some(due) = o.get("due") {
+        params.insert("due_s".into(), json!(parse_due(due)?));
     }
     let mut s = open(&o, Some(from_name.as_str()))?;
     let r = match s.call("message.send", Value::Object(params)) {
@@ -681,16 +687,40 @@ fn print_msgs(msgs: &[Value], o: &Opts) {
 
 pub fn ack(args: &[String]) -> Result<(), Failure> {
     let mut vals = SOCKET_OPTS.to_vec();
-    vals.extend(["id", "as", "stage", "result", "note"]);
+    vals.extend(["id", "as", "stage", "result", "note", "await"]);
     let o = client_opts(args, &vals, &[])?;
     let name = identity(&o, "as")?;
     let name = need(&name, "ack")?.to_string();
     let stage = o.req("stage")?;
-    if stage != "aceito" && stage != "resultado" {
-        return Err(usage("--stage deve ser aceito ou resultado"));
+    if stage != "aceito" && stage != "resultado" && stage != "bloqueado" {
+        return Err(usage("--stage deve ser aceito, resultado ou bloqueado"));
     }
     if o.get("result").is_some() && stage != "resultado" {
         return Err(usage("--result so vale com --stage resultado"));
+    }
+    if stage == "bloqueado" {
+        let await_class = o.req("await")?;
+        if !matches!(
+            await_class,
+            "permission" | "user_input" | "network" | "identity" | "policy" | "unknown" | "none"
+        ) {
+            return Err(usage(
+                "--await deve ser permission, user_input, network, identity, policy, unknown ou none",
+            ));
+        }
+        if o.get("note").is_some() || o.get("result").is_some() {
+            return Err(usage("--stage bloqueado aceita somente --await"));
+        }
+    } else if o.get("await").is_some() {
+        return Err(usage("--await so vale com --stage bloqueado"));
+    }
+    if matches!(o.get("result"), Some("refused" | "failed")) {
+        let note = o
+            .get("note")
+            .ok_or_else(|| usage("--result refused/failed exige --note"))?;
+        if note.chars().count() > 200 {
+            return Err(usage("--note deve ter no maximo 200 caracteres"));
+        }
     }
     let mut params = Map::new();
     params.insert("v".into(), json!(1));
@@ -703,11 +733,37 @@ pub fn ack(args: &[String]) -> Result<(), Failure> {
     if let Some(n) = o.get("note") {
         params.insert("note".into(), json!(n));
     }
+    if let Some(a) = o.get("await") {
+        params.insert("await".into(), json!(a));
+    }
     let mut s = open(&o, Some(name.as_str()))?;
     s.call("message.ack", Value::Object(params))
         .map_err(rpc_fail)?;
     println!("ok");
     Ok(())
+}
+
+fn parse_due(s: &str) -> Result<u64, Failure> {
+    let (number, unit) = s.split_at(s.len().saturating_sub(1));
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(usage("--due deve ser N(s|m|h) inteiro positivo"));
+    }
+    let n = number
+        .parse::<u64>()
+        .map_err(|_| usage("--due fora do intervalo"))?;
+    let factor = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return Err(usage("--due deve terminar em s, m ou h")),
+    };
+    let seconds = n
+        .checked_mul(factor)
+        .ok_or_else(|| usage("--due fora do intervalo"))?;
+    if !(300..=86_400).contains(&seconds) {
+        return Err(usage("--due deve ser de 5 min a 24 h"));
+    }
+    Ok(seconds)
 }
 
 pub fn status(args: &[String]) -> Result<(), Failure> {
@@ -1137,7 +1193,12 @@ fn consume_watch_event(
             let _ = writeln!(out, "{line}");
             let _ = out.flush();
         }
-    } else if st.receipts && matches!(ev["type"].as_str(), Some("accepted" | "resulted")) {
+    } else if st.receipts
+        && matches!(
+            ev["type"].as_str(),
+            Some("accepted" | "resulted" | "blocked")
+        )
+    {
         print_receipt(ev, seq, st, out);
     }
     st.last = Some(seq);
@@ -1147,6 +1208,8 @@ fn consume_watch_event(
 fn print_receipt(ev: &Value, seq: u64, st: &WatchState, out: &mut impl Write) {
     let stage = if ev["type"] == json!("accepted") {
         "aceito".to_string()
+    } else if ev["type"] == json!("blocked") {
+        format!("bloqueado:{}", txt(&ev["await"]))
     } else {
         format!("resultado:{}", txt(&ev["result"]))
     };

@@ -44,6 +44,15 @@ pub struct Config {
     pub bell_poll_ms: u64,
     pub bell_rearm_s: u64,
     pub recipients: BTreeMap<String, Recipient>,
+    pub blocked_receipts: bool,
+    pub due_defaults: BTreeMap<String, u64>,
+    pub roles: Option<Roles>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Roles {
+    pub orchestrator: String,
+    pub owner: String,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +65,22 @@ struct Raw {
     bell_rearm_s: Option<u64>,
     #[serde(default)]
     recipients: BTreeMap<String, RawRecipient>,
+    features: Option<RawFeatures>,
+    due_defaults: Option<BTreeMap<String, u64>>,
+    roles: Option<RawRoles>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFeatures {
+    blocked_receipts: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoles {
+    orchestrator: String,
+    owner: String,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +136,34 @@ pub fn parse(text: &str) -> Result<Config, String> {
         let delivery = parse_delivery(&name, rec)?;
         recipients.insert(name, Recipient { delivery, agent });
     }
+    let blocked_receipts = raw
+        .features
+        .and_then(|f| f.blocked_receipts)
+        .unwrap_or(false);
+    let mut due_defaults =
+        BTreeMap::from([("PEDIDO".to_string(), 1800), ("PERGUNTA".to_string(), 900)]);
+    if let Some(custom) = raw.due_defaults {
+        for (kind, seconds) in custom {
+            if !matches!(kind.as_str(), "PEDIDO" | "PERGUNTA") || !(300..=86_400).contains(&seconds)
+            {
+                return Err(format!("config: due_defaults invalido para '{kind}'"));
+            }
+            due_defaults.insert(kind, seconds);
+        }
+    }
+    let roles = raw
+        .roles
+        .map(|r| {
+            if !valid_name(&r.orchestrator) || !valid_name(&r.owner) {
+                Err("config: roles contem nome invalido".to_string())
+            } else {
+                Ok(Roles {
+                    orchestrator: r.orchestrator,
+                    owner: r.owner,
+                })
+            }
+        })
+        .transpose()?;
     Ok(Config {
         auth_required,
         herdr_bin,
@@ -118,6 +171,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
         bell_poll_ms,
         bell_rearm_s,
         recipients,
+        blocked_receipts,
+        due_defaults,
+        roles,
     })
 }
 

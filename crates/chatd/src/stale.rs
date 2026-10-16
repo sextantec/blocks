@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize, de::IgnoredAny};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,7 @@ struct Event {
     to: Option<String>,
     kind: Option<String>,
     recipient: Option<String>,
+    due_s: Option<u64>,
     #[serde(flatten)]
     _ignored: BTreeMap<String, IgnoredAny>,
 }
@@ -28,11 +30,13 @@ struct Event {
 #[derive(Clone)]
 struct Message {
     seq: u64,
+    id: String,
     to: String,
     kind: String,
     registered: DateTime<Utc>,
     accepted: Option<DateTime<Utc>>,
     resulted: bool,
+    due_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,9 +48,15 @@ struct Episode {
 #[derive(Default, Serialize, Deserialize)]
 struct Stamp {
     #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    scheduler_last_run: Option<String>,
+    #[serde(default)]
     unaccepted: BTreeMap<String, Episode>,
     #[serde(default)]
     no_result: BTreeMap<String, Episode>,
+    #[serde(default)]
+    due_expired: BTreeMap<String, Episode>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +65,7 @@ struct Alert {
     #[serde(rename = "type")]
     alert_type: &'static str,
     count: usize,
+    ids: Vec<String>,
     oldest_min: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     bells: Option<usize>,
@@ -92,12 +103,29 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
         eprintln!("skipped={}", data.skipped);
     }
     let now = Utc::now();
-    let (mut alerts, active_unaccepted, active_results) = detect_alerts(&data, &cli, now);
-    let mut stamp = load_stamp(cli.stamp_path.as_deref())?;
-    prune_stamp(&mut stamp, &active_unaccepted, &active_results);
+    let stamp_path = cli
+        .stamp_path
+        .clone()
+        .unwrap_or_else(|| state_dir.join("stale.stamp"));
+    let _lock = stamp_lock(&stamp_path)?;
+    let (mut alerts, active_unaccepted, active_results, active_due) =
+        detect_alerts(&data, &cli, now);
+    let mut stamp = load_stamp(Some(&stamp_path))?;
+    stamp.version = 1;
+    stamp.scheduler_last_run = Some(now.to_rfc3339());
+    prune_stamp(&mut stamp, &active_unaccepted, &active_results, &active_due);
     mark_new_alerts(&mut alerts, &mut stamp, &data.messages, &cli, now);
-    if let Some(path) = cli.stamp_path.as_deref() {
-        write_stamp(path, &stamp)?;
+    write_stamp(&stamp_path, &stamp)?;
+    let roles = state_dir
+        .parent()
+        .and_then(|p| crate::config::load(&p.join("config.json")).ok())
+        .and_then(|c| c.roles);
+    if let Some(roles) = roles {
+        for alert in &mut alerts {
+            if alert.name == roles.orchestrator {
+                alert.name = roles.owner.clone();
+            }
+        }
     }
     let output = render_alerts(&alerts, cli.json)?;
     write_sink(sink, output.as_bytes())?;
@@ -155,27 +183,72 @@ fn detect_alerts(
     data: &LogData,
     options: &Options,
     now: DateTime<Utc>,
-) -> (Vec<Alert>, HashSet<String>, HashSet<String>) {
-    let pending = data
-        .messages
-        .values()
-        .filter(|m| m.accepted.is_none() && !m.resulted);
-    let mut by_recipient: BTreeMap<&str, Vec<&Message>> = BTreeMap::new();
-    for msg in pending {
-        by_recipient.entry(&msg.to).or_default().push(msg);
+) -> (
+    Vec<Alert>,
+    HashSet<String>,
+    HashSet<String>,
+    HashSet<String>,
+) {
+    let mut due_groups: BTreeMap<&str, Vec<&Message>> = BTreeMap::new();
+    let mut pending_groups: BTreeMap<&str, Vec<&Message>> = BTreeMap::new();
+    let mut result_groups: BTreeMap<&str, Vec<&Message>> = BTreeMap::new();
+    for msg in data.messages.values().filter(|m| !m.resulted) {
+        if msg.due_at.is_some_and(|at| now >= at) {
+            due_groups.entry(&msg.to).or_default().push(msg);
+        } else if msg.accepted.is_none() {
+            pending_groups.entry(&msg.to).or_default().push(msg);
+        } else if matches!(msg.kind.as_str(), "PEDIDO" | "PERGUNTA")
+            && msg
+                .accepted
+                .is_some_and(|at| age_seconds(now, at) as u64 > options.result_older_than)
+        {
+            result_groups.entry(&msg.to).or_default().push(msg);
+        }
     }
-
     let mut alerts = Vec::new();
     let mut active_unaccepted = HashSet::new();
-    for (name, msgs) in by_recipient {
+    for (name, msgs) in pending_groups {
         if let Some(alert) = unaccepted_alert(name, &msgs, data, options, now) {
             active_unaccepted.insert(name.to_string());
             alerts.push(alert);
         }
     }
-    let (result_alerts, active_results) = result_alerts(&data.messages, options, now);
-    alerts.extend(result_alerts);
-    (alerts, active_unaccepted, active_results)
+    let mut active_results = HashSet::new();
+    for (name, msgs) in result_groups {
+        let oldest = msgs
+            .iter()
+            .filter_map(|m| m.accepted.map(|at| (m, at)))
+            .min_by_key(|(_, at)| *at);
+        if let Some((oldest_msg, at)) = oldest {
+            active_results.insert(name.to_string());
+            alerts.push(make_alert(
+                name,
+                "no_result",
+                &msgs,
+                age_seconds(now, at) / 60,
+                None,
+            ));
+            let _ = oldest_msg;
+        }
+    }
+    let mut active_due = HashSet::new();
+    for (name, msgs) in due_groups {
+        active_due.insert(name.to_string());
+        let oldest = msgs
+            .iter()
+            .filter_map(|m| m.due_at.map(|at| (m, at)))
+            .min_by_key(|(_, at)| *at);
+        if let Some((_, at)) = oldest {
+            alerts.push(make_alert(
+                name,
+                "due_expired",
+                &msgs,
+                age_seconds(now, at) / 60,
+                None,
+            ));
+        }
+    }
+    (alerts, active_unaccepted, active_results, active_due)
 }
 
 fn unaccepted_alert(
@@ -201,50 +274,46 @@ fn unaccepted_alert(
         name: name.to_string(),
         alert_type: "unaccepted",
         count: msgs.len(),
+        ids: sorted_ids(msgs),
         oldest_min: oldest_age / 60,
         bells: Some(bell_count),
         new_alert: false,
     })
 }
 
-fn result_alerts(
-    messages: &HashMap<String, Message>,
-    options: &Options,
-    now: DateTime<Utc>,
-) -> (Vec<Alert>, HashSet<String>) {
-    let mut groups: BTreeMap<&str, Vec<&Message>> = BTreeMap::new();
-    for msg in messages.values() {
-        if let Some(accepted) = msg.accepted
-            && matches!(msg.kind.as_str(), "PEDIDO" | "PERGUNTA")
-            && !msg.resulted
-            && age_seconds(now, accepted) as u64 > options.result_older_than
-        {
-            groups.entry(&msg.to).or_default().push(msg);
-        }
-    }
-    let mut active = HashSet::new();
-    let alerts = groups
-        .into_iter()
-        .filter_map(|(name, msgs)| {
-            let oldest = msgs.iter().min_by_key(|m| m.accepted)?;
-            let age = age_seconds(now, oldest.accepted?);
-            active.insert(name.to_string());
-            Some(Alert {
-                name: name.to_string(),
-                alert_type: "no_result",
-                count: msgs.len(),
-                oldest_min: age / 60,
-                bells: None,
-                new_alert: false,
-            })
-        })
-        .collect();
-    (alerts, active)
+fn sorted_ids(msgs: &[&Message]) -> Vec<String> {
+    let mut rows = msgs.to_vec();
+    rows.sort_by_key(|m| m.seq);
+    rows.into_iter().map(|m| m.id.clone()).collect()
 }
 
-fn prune_stamp(stamp: &mut Stamp, unaccepted: &HashSet<String>, results: &HashSet<String>) {
+fn make_alert(
+    name: &str,
+    alert_type: &'static str,
+    msgs: &[&Message],
+    oldest_min: i64,
+    bells: Option<usize>,
+) -> Alert {
+    Alert {
+        name: name.to_string(),
+        alert_type,
+        count: msgs.len(),
+        ids: sorted_ids(msgs),
+        oldest_min,
+        bells,
+        new_alert: false,
+    }
+}
+
+fn prune_stamp(
+    stamp: &mut Stamp,
+    unaccepted: &HashSet<String>,
+    results: &HashSet<String>,
+    due: &HashSet<String>,
+) {
     stamp.unaccepted.retain(|name, _| unaccepted.contains(name));
     stamp.no_result.retain(|name, _| results.contains(name));
+    stamp.due_expired.retain(|name, _| due.contains(name));
 }
 
 fn mark_new_alerts(
@@ -255,16 +324,16 @@ fn mark_new_alerts(
     now: DateTime<Utc>,
 ) {
     for alert in alerts {
-        let threshold = if alert.alert_type == "unaccepted" {
-            options.older_than
-        } else {
-            options.result_older_than
+        let threshold = match alert.alert_type {
+            "unaccepted" => options.older_than,
+            "no_result" => options.result_older_than,
+            _ => options.older_than,
         };
         let first_seq = episode_first_seq(alert, messages);
-        let entries = if alert.alert_type == "unaccepted" {
-            &mut stamp.unaccepted
-        } else {
-            &mut stamp.no_result
+        let entries = match alert.alert_type {
+            "unaccepted" => &mut stamp.unaccepted,
+            "no_result" => &mut stamp.no_result,
+            _ => &mut stamp.due_expired,
         };
         let due = entries.get(&alert.name).is_none_or(|episode| {
             episode.episode_first_seq != first_seq
@@ -306,7 +375,14 @@ fn render_alerts(alerts: &[Alert], json: bool) -> Result<String, Failure> {
 }
 
 fn format_alert(alert: &Alert) -> String {
-    if alert.alert_type == "unaccepted" {
+    if alert.alert_type == "due_expired" {
+        format!(
+            "[chat] due_expired: {} {} mensagem(ns): {}",
+            alert.name,
+            alert.count,
+            alert.ids.join(" ")
+        )
+    } else if alert.alert_type == "unaccepted" {
         format!(
             "[chat] parado: {} {} pendente(s), mais antiga {} min, campainha {} vez(es)",
             alert.name,
@@ -379,14 +455,18 @@ fn apply_event(
                 return false;
             };
             messages.insert(
-                id,
+                id.clone(),
                 Message {
                     seq: event.seq,
+                    id: id.clone(),
                     to,
                     kind,
                     registered: ts,
                     accepted: None,
                     resulted: false,
+                    due_at: event
+                        .due_s
+                        .and_then(|s| ts.checked_add_signed(chrono::TimeDelta::seconds(s as i64))),
                 },
             );
             true
@@ -428,7 +508,9 @@ fn episode_first_seq(alert: &Alert, messages: &HashMap<String, Message>) -> u64 
         .values()
         .filter(|m| m.to == alert.name)
         .filter(|m| {
-            if alert.alert_type == "unaccepted" {
+            if alert.alert_type == "due_expired" {
+                m.due_at.is_some()
+            } else if alert.alert_type == "unaccepted" {
                 m.accepted.is_none() && !m.resulted
             } else {
                 matches!(m.kind.as_str(), "PEDIDO" | "PERGUNTA")
@@ -439,6 +521,29 @@ fn episode_first_seq(alert: &Alert, messages: &HashMap<String, Message>) -> u64 
         .map(|m| m.seq)
         .min()
         .unwrap_or(0)
+}
+
+fn stamp_lock(path: &Path) -> Result<File, Failure> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)
+        .map_err(|e| usage(format!("nao criei diretorio do stamp-file: {e}")))?;
+    let lock_path = path.with_extension("lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .map_err(|e| usage(format!("nao abri trava do stamp-file: {e}")))?;
+    // SAFETY: o descritor permanece vivo durante a secao critica desta execucao.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(usage("nao travei stamp-file"));
+    }
+    Ok(file)
 }
 
 fn read_stamp(path: &Path) -> Result<Stamp, Failure> {

@@ -1,6 +1,6 @@
 //! Log append-only (`log.jsonl`), dobra dos eventos, recuperacao de partida e trava (spec v1 6 e v1.1).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -49,6 +49,9 @@ pub struct Msg {
     pub resulted_at: Option<String>,
     pub result: Option<String>,
     pub note: Option<String>,
+    pub due_s: Option<u64>,
+    pub await_class: Option<String>,
+    pub since: Option<String>,
 }
 
 /// Mensagem no formato do protocolo (spec v1 5.2, com `refs` da v1.1).
@@ -70,6 +73,9 @@ pub fn msg_json(m: &Msg) -> Value {
         "resulted_at": m.resulted_at,
         "result": m.result,
         "note": m.note,
+        "due_s": m.due_s,
+        "await": m.await_class,
+        "since": m.since,
     })
 }
 
@@ -99,6 +105,7 @@ pub struct Store {
     outstanding: HashMap<String, Instant>,
     bell_fail_at: HashMap<String, Instant>,
     broken: bool,
+    receipt_times: HashMap<String, VecDeque<Instant>>,
 }
 
 fn open_private(path: &Path) -> Result<File, String> {
@@ -136,6 +143,7 @@ impl Store {
             outstanding: HashMap::new(),
             bell_fail_at: HashMap::new(),
             broken: false,
+            receipt_times: HashMap::new(),
         };
         let mut pos = 0usize;
         let mut cut: Option<usize> = None;
@@ -242,6 +250,9 @@ impl Store {
                     resulted_at: None,
                     result: None,
                     note: None,
+                    due_s: obj.get("due_s").and_then(Value::as_u64),
+                    await_class: None,
+                    since: None,
                 };
                 self.msgs.insert(id.to_string(), msg);
             }
@@ -281,11 +292,54 @@ impl Store {
                 m.state = State::Resultado;
                 m.resulted_at = Some(ts);
                 m.result = Some(result.to_string());
+                m.await_class = None;
+                m.since = None;
                 if note.is_some() {
                     m.note = note;
                 }
                 let to = m.to.clone();
                 self.outstanding.remove(&to);
+            }
+            "blocked" => {
+                let id = str_field(obj, "id")?;
+                let await_class = match obj.get("await") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(v))
+                        if [
+                            "permission",
+                            "user_input",
+                            "network",
+                            "identity",
+                            "policy",
+                            "unknown",
+                        ]
+                        .contains(&v.as_str()) =>
+                    {
+                        Some(v.clone())
+                    }
+                    _ => return Err("await de blocked invalido".to_string()),
+                };
+                let m = self
+                    .msgs
+                    .get_mut(id)
+                    .ok_or_else(|| format!("blocked para id desconhecido '{id}'"))?;
+                if m.state != State::Aceito {
+                    return Err(format!(
+                        "blocked invalido para '{id}' no estado {}",
+                        m.state.as_str()
+                    ));
+                }
+                m.since = if await_class.is_some() {
+                    Some(
+                        obj.get("since")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&ts)
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                m.await_class = await_class;
             }
             "auth_failed" => {}
             "denied" => {
@@ -398,7 +452,7 @@ impl Store {
                 obj.get("from").and_then(Value::as_str) == Some(who)
                     || obj.get("to").and_then(Value::as_str) == Some(who)
             }
-            Some("accepted") | Some("resulted") => {
+            Some("accepted") | Some("resulted") | Some("blocked") => {
                 let id = obj.get("id").and_then(Value::as_str).unwrap_or("");
                 self.msgs
                     .get(id)
@@ -476,6 +530,9 @@ impl Store {
         ev.insert("resulted_at".into(), Value::Null);
         ev.insert("result".into(), Value::Null);
         ev.insert("note".into(), Value::Null);
+        if let Some(due_s) = p.due_s {
+            ev.insert("due_s".into(), json!(due_s));
+        }
         let target_to_close = if !p.keep_open && p.kind == "RESPOSTA" {
             p.thread.as_ref().and_then(|target_id| {
                 self.msgs.get(target_id).and_then(|target| {
@@ -535,11 +592,17 @@ impl Store {
                 || ev.get("to").and_then(Value::as_str) == Some(who))
             .then(|| ev.clone());
         }
-        if !matches!(kind, "accepted" | "resulted") {
+        if !matches!(kind, "accepted" | "resulted" | "blocked") {
             return None;
         }
         let id = ev.get("id").and_then(Value::as_str)?;
-        let message = self.msgs.get(id).filter(|m| m.from == who && m.to != who)?;
+        let message = self.msgs.get(id).filter(|m| {
+            if kind == "blocked" {
+                m.from == who || m.to == who
+            } else {
+                m.from == who && m.to != who
+            }
+        })?;
         let mut visible = ev.clone();
         if let Some(obj) = visible.as_object_mut() {
             obj.insert("receipt_to".into(), json!(message.to));
@@ -581,11 +644,62 @@ impl Store {
             .cloned()
             .ok_or_else(|| ApiError::new("unknown_message", "mensagem nao registrada"))?;
         if m.to != by {
+            if p.stage == "bloqueado" {
+                return Err(ApiError::new("not_found", "mensagem nao encontrada"));
+            }
             return Err(ApiError::new(
                 "forbidden",
                 "so o destinatario confirma a mensagem",
             ));
         }
+        if p.stage == "bloqueado" {
+            if m.state != State::Aceito {
+                return Err(ApiError::new(
+                    "invalid_transition",
+                    "bloqueado exige mensagem aceita",
+                ));
+            }
+            let next = p.await_class.as_deref().expect("parse_ack exige await");
+            if m.await_class.as_deref() == Some(next) {
+                return Ok((m, true));
+            }
+            let count = self
+                .events
+                .iter()
+                .filter(|e| e["type"] == "blocked" && e["id"] == p.id)
+                .count();
+            if count >= 6 {
+                return Err(ApiError::new(
+                    "rate_limited",
+                    "limite de bloqueios por mensagem",
+                ));
+            }
+            self.check_receipt_rate(by)?;
+            let mut ev = Map::new();
+            ev.insert("type".into(), json!("blocked"));
+            ev.insert("id".into(), json!(p.id));
+            ev.insert("by".into(), json!(by));
+            let ts = now_ts();
+            ev.insert("ts".into(), json!(ts));
+            ev.insert("since".into(), json!(ts));
+            ev.insert(
+                "await".into(),
+                if next == "none" {
+                    Value::Null
+                } else {
+                    json!(next)
+                },
+            );
+            ev.insert("note".into(), Value::Null);
+            self.append(ev)?;
+            let updated = self
+                .msgs
+                .get(&p.id)
+                .cloned()
+                .ok_or_else(|| internal("mensagem sumiu apos bloqueio".to_string()))?;
+            return Ok((updated, false));
+        }
+        self.check_receipt_rate(by)?;
         let mut ev = Map::new();
         ev.insert("id".into(), json!(p.id));
         ev.insert("ts".into(), json!(now_ts()));
@@ -622,6 +736,25 @@ impl Store {
             .cloned()
             .ok_or_else(|| internal("mensagem sumiu apos ack".to_string()))?;
         Ok((m, false))
+    }
+
+    fn check_receipt_rate(&mut self, by: &str) -> Result<(), ApiError> {
+        let now = Instant::now();
+        let times = self.receipt_times.entry(by.to_string()).or_default();
+        while times
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
+        {
+            times.pop_front();
+        }
+        if times.len() >= 30 {
+            return Err(ApiError::new(
+                "rate_limited",
+                "limite de recibos por minuto",
+            ));
+        }
+        times.push_back(now);
+        Ok(())
     }
 
     /// Falha de autenticacao (v1.1 B): nunca grava o token.
@@ -797,6 +930,7 @@ mod tests {
             thread: None,
             refs: Vec::new(),
             keep_open: false,
+            due_s: None,
         }
     }
 

@@ -6,6 +6,7 @@ mod binding;
 mod client;
 mod config;
 mod hash;
+mod obligations;
 mod protocol;
 mod server;
 mod stale;
@@ -179,6 +180,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "whoami" => client::whoami(rest),
         "log" => client::log(rest),
         "stale" => stale::run(rest),
+        "obligations" => obligations::run(rest),
         "token" => auth::cli(rest),
         "-h" | "--help" => {
             println!("{USAGE}");

@@ -310,6 +310,7 @@ pub struct SendParams {
     pub thread: Option<String>,
     pub refs: Vec<Ref>,
     pub keep_open: bool,
+    pub due_s: Option<u64>,
 }
 
 pub fn parse_send(p: &Map<String, Value>) -> Result<SendParams, ApiError> {
@@ -325,6 +326,7 @@ pub fn parse_send(p: &Map<String, Value>) -> Result<SendParams, ApiError> {
             "thread",
             "refs",
             "keep_open",
+            "due_s",
         ],
     )?;
     let id = req_str(p, "id")?;
@@ -371,6 +373,14 @@ pub fn parse_send(p: &Map<String, Value>) -> Result<SendParams, ApiError> {
         thread,
         refs,
         keep_open: opt_bool(p, "keep_open")?.unwrap_or(false),
+        due_s: match p.get("due_s") {
+            None => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .filter(|n| (300..=86_400).contains(n))
+                    .ok_or_else(|| ApiError::invalid("/due_s", "due_s fora do intervalo"))?,
+            ),
+        },
     })
 }
 
@@ -380,20 +390,21 @@ pub struct AckParams {
     pub stage: String,
     pub result: Option<String>,
     pub note: Option<String>,
+    pub await_class: Option<String>,
 }
 
 pub fn parse_ack(p: &Map<String, Value>) -> Result<AckParams, ApiError> {
-    reject_unknown(p, &["id", "by", "stage", "result", "note"])?;
+    reject_unknown(p, &["id", "by", "stage", "result", "note", "await"])?;
     let id = req_str(p, "id")?;
     if !valid_id(id) {
         return Err(ApiError::invalid("/id", "id invalido"));
     }
     let by = opt_str(p, "by")?.map(str::to_string);
     let stage = req_str(p, "stage")?;
-    if stage != "aceito" && stage != "resultado" {
+    if stage != "aceito" && stage != "resultado" && stage != "bloqueado" {
         return Err(ApiError::invalid(
             "/stage",
-            "stage deve ser aceito ou resultado",
+            "stage deve ser aceito, resultado ou bloqueado",
         ));
     }
     let result = match opt_str(p, "result")? {
@@ -414,13 +425,53 @@ pub fn parse_ack(p: &Map<String, Value>) -> Result<AckParams, ApiError> {
             Some(r.to_string())
         }
     };
+    let allow_untrusted_note =
+        stage == "resultado" && matches!(result.as_deref(), Some("refused" | "failed"));
     let note = match opt_str(p, "note")? {
         None => None,
-        Some(n) if n.chars().count() <= MAX_NOTE && !has_control(n, &['\t']) => Some(n.to_string()),
+        Some(n)
+            if n.chars().count() <= MAX_NOTE
+                && (allow_untrusted_note || !has_control(n, &['\t'])) =>
+        {
+            Some(n.to_string())
+        }
         Some(_) => {
             return Err(ApiError::invalid(
                 "/note",
                 "note invalida (ate 1024 caracteres, sem controle exceto tab)",
+            ));
+        }
+    };
+    if stage == "bloqueado" && note.is_some() {
+        return Err(ApiError::invalid(
+            "/note",
+            "bloqueado nao aceita nota livre",
+        ));
+    }
+    let await_class = match opt_str(p, "await")? {
+        None if stage == "bloqueado" => {
+            return Err(ApiError::invalid("/await", "bloqueado exige await"));
+        }
+        None => None,
+        Some("none") if stage == "bloqueado" => Some("none".to_string()),
+        Some(v)
+            if stage == "bloqueado"
+                && [
+                    "permission",
+                    "user_input",
+                    "network",
+                    "identity",
+                    "policy",
+                    "unknown",
+                ]
+                .contains(&v) =>
+        {
+            Some(v.to_string())
+        }
+        Some(_) => {
+            return Err(ApiError::invalid(
+                "/await",
+                "await invalido ou fora de stage bloqueado",
             ));
         }
     };
@@ -430,6 +481,7 @@ pub fn parse_ack(p: &Map<String, Value>) -> Result<AckParams, ApiError> {
         stage: stage.to_string(),
         result,
         note,
+        await_class,
     })
 }
 
