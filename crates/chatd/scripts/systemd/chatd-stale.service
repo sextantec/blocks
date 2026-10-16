@@ -8,13 +8,14 @@ After=chatd.service
 [Service]
 Type=oneshot
 Environment=CHATD_HOME=%h/.local/state/chatd
-ExecStart=%h/.local/bin/chatd stale --state-dir ${CHATD_HOME}/state --notify file:${CHATD_HOME}/alerts.log --stamp-file ${CHATD_HOME}/stale.stamp
+ExecStart=%h/.local/bin/chatd stale --state-dir ${CHATD_HOME}/state --notify file:${CHATD_HOME}/alerts.log --notify tmux --tmux-bin %h/.local/bin/tmux --stamp-file ${CHATD_HOME}/stale.stamp
 # 0 = nada novo; 6 = aviso novo gravado (nao e falha).
 SuccessExitStatus=6
 # Endurecimento: so le o estado do chatd e anexa em alerts.log/stale.stamp. Sem rede.
 NoNewPrivileges=yes
 PrivateNetwork=yes
-PrivateTmp=yes
+# PrivateTmp=no de proposito (v1.9): o socket do tmux fica em /tmp/tmux-UID/default e PrivateTmp o esconderia.
+PrivateTmp=no
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/state/chatd
