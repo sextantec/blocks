@@ -1,6 +1,6 @@
 # memd v0: daemon de contexto e memoria compartilhada entre agentes (contrato) | RASCUNHO v0 (2026-10-16)
 
-**Estado: RASCUNHO para revisao (Jabbur, Astra, codex-blocks). Nao ha codigo.** Origem: o Jabbur, em 2026-10-16: "a minha arquitetura inclua, como sempre, um daemon que e quem da acesso e controla a memoria. Cada agente recebe uma chave e as intencoes de como usar" e "Vamos fazer o spec do darmin agora" (conversa do Claude Code). **Nome:** `memd` e nome de trabalho; o Jabbur escreveu "darmin" e a grafia/nome final esta em aberto (secao 14). Consultas: Astra (job 996, `/var/tmp/escriba-status/runs/996-MemAstra*`), codex-blocks (chatd msg 610); pendencia P-88 da bancada.
+**Estado: RASCUNHO para revisao (Jabbur, Astra, codex-blocks). Nao ha codigo.** Origem: o Jabbur, em 2026-10-16: "a minha arquitetura inclua, como sempre, um daemon que e quem da acesso e controla a memoria. Cada agente recebe uma chave e as intencoes de como usar" e "Vamos fazer o spec do darmin agora" (conversa do Claude Code). **Nome:** `memd` (confirmado pelo Jabbur em 2026-10-16: "Darmim foi o corretor, memd esta otimo"; "darmin" era erro do corretor de texto). Consultas: Astra (job 996, `/var/tmp/escriba-status/runs/996-MemAstra*`), codex-blocks (chatd msg 610); pendencia P-88 da bancada.
 
 ## 0. O que e, e o que nao e
 - **E:** um daemon pequeno, estilo unix, **dono** de um armazenamento de registros curados (decisoes, pendencias, regras, handoffs) compartilhado por varios agentes. Cada agente fala por socket com uma **chave** (token) e um **perfil de permissoes**; o daemon impoe "propor x promover x ler" e entrega **visoes com orcamento de tamanho**.
@@ -85,7 +85,7 @@ Aplicadas na promocao, nao so em guia: campos obrigatorios e enums; `source` ver
 - **Piloto (P-88):** 10 decisoes + 10 pendencias reais; sessoes limpas de Claude e Codex antes e depois; metas: >= 30% menos tokens para abrir, 10/10 estados de pendencia certos, <= 15 min/dia de manutencao; **segundo workspace criado so com `memd init`** e um agente novo (Haiku sem contexto) que acerta uma consulta e uma proposta sem ser ensinado. Parar se falhar.
 
 ## 14. Em aberto (decisao do Jabbur ou dos agentes)
-1. **Nome** (`memd`, ou o que o Jabbur quis dizer com "darmin"). 2. **`memd` x `journald`:** fundir (recomendacao do Astra) ou blocos separados. 3. **Onde mora a chave de assinatura do dono** (v1). 4. Se o codex-blocks le a bancada privada a partir do workspace dele (afeta onde fica o diretorio de estado). 5. Contas Unix por agente (isolamento real). 6. Quem cura quando o Sextante nao esta.
+1. ~~Nome~~ decidido: `memd`. 2. **`memd` x `journald`:** fundir (recomendacao do Astra) ou blocos separados. 3. **Onde mora a chave de assinatura do dono** (v1). 4. Se o codex-blocks le a bancada privada a partir do workspace dele (afeta onde fica o diretorio de estado). 5. Contas Unix por agente (isolamento real). 6. Quem cura quando o Sextante nao esta.
 
 ## 15. Fora desta spec
 Captura automatica, vetores, MCP, SQL, `leased`, agendador de tarefas, execucao, concessao de poder (e do `grantd`), cifra e rede (v2), UI.
