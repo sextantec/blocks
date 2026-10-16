@@ -59,7 +59,7 @@ Como rodar (offline, sem tmux real, sem agente real):
 | R12 | 3 | 25 configs invalidas nao sobem (cada recusa tem controle positivo); chave duplicada; fonte por `pane` sobe e funciona. `tmux_bin` nao-string ou vazio recusa (15.4) |
 | R12 (15.4) | 1 | sem `tmux_bin` o daemon usa o `tmux` do PATH (PATH controlado so com o falso) |
 | R13 | 1 | leitura travada: unknown+error, depois `stale` com `last_known`; `stale` nao antes de `stale_after_ms`; volta com leitura valida. O limite exato nao e medido |
-| R14 | 0 | fora deste escopo |
+| R14 | 42 (rodada 5, `rev5_protocol.rs`) | protocolo, CLI, reinicio, atomicidade, assinante lento: ver "Rodada 5" |
 | R15 | 1 | 11 sinais medidos com a tela real (plano, /model, pergunta, confianca, Claude 60 colunas, Codex `[ . ]`/`[ ! ]`, Update, transcricao, Pi 50 colunas, Pi /model) |
 | R16 | 1 | telas ociosas sem a linha de modo nunca viram idle (versao real nao coberta, ver lacunas) |
 | R17 | 2 | rascunho logo apos working nao publica idle; rascunho estavel confirma idle com `input: draft` |
@@ -288,3 +288,89 @@ sobe) antes da recusa, para que um binario que recusa tudo nao passe por acident
   `src/` antes de o implementador commitar. Quem commita deve conferir o diff de `src/` no commit do implementador.
   Daqui em diante usei so a checagem, sem reescrever `src/`.
 - Nenhum `git add`, `stash`, `reset`, `checkout` ou commit foi feito por mim.
+
+## Rodada 5: migracao do `agentd_v1.rs` (herdr) para o tmux falso
+
+Escopo (coordenador, 2026-10-16, autorizado pelo Jabbur: "A"): migrar para `tests/rev5_protocol.rs` **so** os testes
+de protocolo, CLI, atomicidade, assinante lento e reinicio (grupos G5, G6, G9, G10, G12, G14, G20 e G22 da rev4 secao
+10), e apagar o resto. `tests/agentd_v1.rs` e `tests/common/` (herdr) foram **removidos** depois que os migrados
+passaram contra a implementacao (rev5.3, commit 2c74c6b). Nada em `src/`; nenhum commit.
+
+**Contagem:** o `agentd_v1.rs` tinha 83 testes. Migrados 41 (+1 novo: `watch --json`; 1 ignorado). Apagados 42.
+
+### Migrados (`rev5_protocol.rs`, 41 passam + 1 ignorado + 1 novo)
+
+| Grupo | Old | Migrados | Nomes novos (`r14_...`) e nota |
+|---|---|---|---|
+| G5 eventos | 3 | 3 | `g5_seq_sem_lacunas` -> `seq_sem_lacunas_e_previous_state_encadeado` (3 eventos: unknown->working, working->blocked, blocked->working; seq 1 primeiro); `g5_evidence_e_source` -> `primeira_leitura_valida_gera_evento_com_evidence_observed_e_source_tmux` (source tmux, controle: antes evidence none); `g5_observed_at_freshness_e_cwd` -> `observed_at_freshness_e_cwd_nao_geram_evento` |
+| G6 events.resume | 6 | 6 | `retoma_valido_com_last_seq_igual_ao_head`; `resume_gap_informa_oldest_seq_e_fronteira_exata` (anel 64, 32 agentes, `oldest = head - ring + 1`, rev4 13.5); `epoch_mismatch_apos_reinicio`; `last_seq_maior_que_head_e_negativo`; `segunda_chamada_de_resume`; `sem_eventos_head_zero_retoma_e_mais_um_falha` |
+| G9 protocolo | 10 | 10 | campo desconhecido (`data.path` = `params.extra`, rev4 13.2); 1 MiB com LF aceita; 1 MiB + 1 = `invalid_request` e conexao fechada (13.2; antes era "nao processada"); EOF sem LF; UTF-8 invalido; `params` null (aceita 2 codigos, ver ambiguidade 4); pedido sem id; lote = `invalid_request` (13.2); `method_not_found`; `unsupported_version` |
+| G10 seguranca | 2 | 1 + 1 ignorado | 0700/0600 migrado; outro uid segue `#[ignore]` (nao ha segundo uid no ambiente) |
+| G12 CLI | 11 | 11 + 1 novo | get sem JSON (linha com `tmux`), get JSON (envelope + `data.agent` da 15.1), list com `--kind` (`data.agents`), health 0 (agente unknown, fonte ok), health 1 (fonte falha, 13.3), status, codigos 2/3/4, socket por `--state-dir` e `AGENTD_SOCKET`, watch (uma linha por troca). **Novo:** `watch --json` traz o Evento em `data` (15.1) |
+| G14 reinicio | 1 | 1 | epoch muda; `agentd: pronto` em stderr (13.6); nada persiste (`last_known` null e estado nao volta) |
+| G20 atomicidade | 1 | 1 | snapshot (`agent.get`) e `head_seq` do mesmo instante; replay + ao vivo sem lacunas; >= 20 eventos (controle) |
+| G22 assinante lento | 1 | 1 | `closed(slow_consumer)` depois de 256 eventos sem leitura; `agent.get` < 1 s durante toda a troca (controle) |
+| contrato (rev4 3, 5) | 6 | 6 | campos do Agente (`source` = `tmux`); freshness/last_seen/observed_at null antes da primeira leitura valida; epoch string de 64 bits; `unknown_agent`; `agent.list` ordenada por id e filtro por kind; forma do `status` com `last_error` = `source_exit_nonzero` |
+
+Os migrados que eram negativos ganharam controle positivo (o mesmo pedido sem o defeito tem que dar resultado), para
+que um daemon que responde sempre o mesmo erro nao passe. Ex.: `epoch_mismatch` tambem exige que a epoch nova retome;
+`health 1` exige que, com a fonte de volta, `health` sai 0; `codigo 4` exige que, com o daemon no ar, `get` sai 0.
+
+### Apagados (42)
+
+| Grupo | Old | Motivo | Cobertura atual |
+|---|---|---|---|
+| G1 mapeamento herdr | 6 | mapeia `agent_status` do herdr (`done`, `unknown` etc.) | R1 (38 goldens) e R15 (`rev5_rules`) |
+| G2 leitura falha (herdr) | 7 | `agent` nulo, `kind_mismatch`, `pane` duplicado do herdr | R2 (`rev5_source`) |
+| G3 stale travado | 1 | leitura travada no herdr | R13 (`rev5_source`) |
+| G4 gone | 2 | ausencia no herdr | R10 (`rev5_source`) |
+| G17 erro + ausencia | 1 | precedencia herdr | R2/R10 (`rev5_source`) |
+| G7 lista fechada (herdr) | 1 | so `herdr agent list` | R3 (`rev5_source`) |
+| G8 sem shell (herdr) | 2 | `pane`/`herdr_bin` | R4 (`rev5_source`) |
+| G11 privacidade (herdr) | 1 | sentinelas em titulo/stderr do herdr | R5 (`rev5_source`) |
+| G13 configuracao | 6 | campo desconhecido, pane/id repetido, > 32, stale | R12 (`rev5_config_cli`) |
+| G15 confirmacao de idle | 7 | fila de leituras do herdr | R6 (`rev5_rules`) e R19 (`rev5_events`) |
+| G16 zeragem da janela | 2 | idem | R6 (`rev5_rules`) |
+| G18 limites exatos | 2 | stale/gone exatos | R13 e R10 (limite exato nao medido, spec 15.9) |
+| G19 terminal_id | 1 | troca de terminal no herdr | R10 (`rev5_source`, troca de pid) |
+| G21 subprocesso | 2 | travamento e descendente vivo | R3 (sem sobreposicao) e R13 (stale). **Lacuna:** descendente vivo nao coberto |
+| G23 launch_pending | 1 | campo exclusivo do herdr | sem equivalente no tmux |
+
+### Pendentes (nao migrados de proposito)
+
+- **G23 a G29 da rev4 secao 14** (`since`, `blocked_reason`): nao implementados (rev4 13.7 / secao 14). Nao migrados,
+  como pedido. Ficam pendentes ate a implementacao: `since` (inicio da mudanca, sem mudanca em `marks`), `blocked_reason`
+  (`permission|user_input|unknown`, `null` fora de `blocked`), e a emenda 14.4 (campos aditivos).
+- **G21 descendente vivo nao impede os ciclos**: nao ha equivalente no falso tmux (exigiria um filho do `list-panes`
+  que sobrevive ao timeout). Lacuna real de R3/R13.
+- **G18 limites exatos** (stale no limite, gone no limite): spec 15.9 diz que os testes nao medem o limite exato.
+
+### Ambiguidades (a spec nao fixa; afirmamos so o garantido)
+
+1. **Linha do `watch` sem `--json`:** o formato nao esta fixado. O teste so afirma que a linha traz o id e o novo estado.
+2. **Codigo de `params` null:** `invalid_request` ou `invalid_envelope` (rev4 5 nao fixa). Os dois sao aceitos.
+3. **Listagem do diretorio de estado (G14):** o antigo teste afirmava so o socket no diretorio. A spec (rev4 2/9) proibe
+   persistir estado, mas nao lista os arquivos permitidos. Nao afirmado; afirmamos so que nada do estado anterior volta.
+4. **Campo `cwd` no `Agente` (tmux):** a rev4 3 o define, mas o tmux nao traz o diretorio de trabalho do agente (o
+   caminho do painel e a fonte da descoberta, rev5.3 16). Afirmamos so a presenca da chave.
+5. **`observed_at` antes da primeira leitura valida:** rev4 13.3 fixa `null`. Afirmado.
+6. **Epoch depois de SIGTERM:** rev4 13.2 fixa saida 0 com SIGTERM. Afirmado.
+7. **Anel depois de lotado:** rev4 13.5 fixa `oldest = head - ring + 1`. Afirmado (o antigo tinha a formula como AMBIGUO).
+8. **Linha acima de 1 MiB:** rev4 13.2 fixa `invalid_request` e conexao fechada. Afirmado (o antigo aceitava "nao processada").
+9. **Outro uid:** nao ha segundo uid no ambiente; o teste fica `#[ignore]` com o motivo.
+
+### Lacunas
+
+- **Tempo:** `rev5_protocol` leva ~18 s (o G20 ~9 s, o G22 com teto de 25 s e ~5 s de troca). O esquecimento de
+  `rev5_discovery` (60 s) continua sendo o teste mais longo do conjunto.
+- **Descendente vivo** (G21): nao coberto (ver pendentes).
+
+### Verificacao (rodada 5)
+
+Saidas coladas no relatorio final da rodada (ver mensagem ao coordenador). Resumo:
+- `cargo fmt -p agentd -- --check`: limpo.
+- `cargo clippy --offline -p agentd --all-targets -- -D warnings`: sai 0.
+- `cargo test --offline -p agentd --no-fail-fast`: 144 passam, 1 ignorado (outro uid). `rev5_discovery` leva ~66 s por causa
+  do esquecimento de 60 s.
+- `git status --short`: `D tests/agentd_v1.rs`, `D tests/common/mod.rs`, `M tests/rev5_common/mod.rs`, `?? tests/rev5_protocol.rs`,
+  `M tests/REV5-TESTES.md`. `src/` limpo.

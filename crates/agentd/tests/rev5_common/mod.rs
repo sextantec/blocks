@@ -635,6 +635,11 @@ impl Conexao {
         let _ = self.escritor.write_all(bytes);
     }
 
+    /// Fecha so a escrita: o servidor ve EOF depois do que ja foi enviado (rev4 13.2: EOF sem LF processa a linha).
+    pub fn fecha_escrita(&mut self) {
+        let _ = self.escritor.shutdown(std::net::Shutdown::Write);
+    }
+
     pub fn envia_bruto(&mut self, linha: &str) {
         self.bruto(linha.as_bytes());
         self.bruto(b"\n");
@@ -703,6 +708,14 @@ impl Conexao {
 
 pub fn rpc(socket: &Path, metodo: &str, params: Value) -> Value {
     Conexao::abre(socket).chama(metodo, params)
+}
+
+/// `error.data.path` (trilha do campo, rev4 13.2). Falha se nao houver.
+pub fn caminho(r: &Value) -> String {
+    r["error"]["data"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sem error.data.path em {r}"))
+        .to_string()
 }
 
 /// `result` da resposta; falha se houver erro.
