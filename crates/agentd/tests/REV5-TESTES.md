@@ -168,9 +168,11 @@ Acrescimos desta rodada (nao sao correcoes de teste errado):
 - `tests/rev5_common/fake_tmux.py:157`: registra `ev="emitida"` por linha `%output` repassada (instrumentacao, sem
   mudar o comportamento). Serviu para provar que o falso emitiu exatamente as 50 linhas da rajada.
 
-## Defeito apontado pelos testes (implementacao, nao teste)
+## Defeito apontado pelos testes (rodada 3): resolvido na rodada 4
 
-Com a implementacao em andamento (src/ modificado pelo implementador):
+Na rodada 3, com a implementacao em andamento, estes dois testes falhavam. Na rodada 4 (binario atual, rev5.2
+comitada) `rev5_events` passa 14/14, inclusive os dois: o defeito foi corrigido pela implementacao. Os testes nao
+foram afrouxados. Registro historico:
 - `r18_rajada_de_output_gera_poucos_ciclos_nao_um_por_linha` (`rev5_events.rs`): 50 linhas `%output` em rajada geram
   15 a 17 ciclos em ~1 s (cadencia de ~50 ms). A spec (R18) pede **um** ciclo por rajada e (4A) no maximo um ciclo
   por `event_debounce_ms` (150 ms).
@@ -198,4 +200,91 @@ Esses dois testes sao a prova; nao foram afrouxados.
 - Contagem: 66 testes rev5 (rules 20, source 18, events 14, config_cli 14) e 13 de harness.
 - `git status --short`: `M crates/agentd/docs/spec-rev5.md` (secao 15, do coordenador); `M` e `??` em `tests/rev5_*` e
   `tests/REV5-TESTES.md`. Alteracoes do implementador em `src/`, `Cargo.*` (fora deste trabalho).
+- Nenhum `git add`, `stash`, `reset`, `checkout` ou commit foi feito por mim.
+
+## Rodada 4 (rev5.3): descoberta de agentes (R21 a R27)
+
+Arquivos: `rev5_discovery.rs` (novo, 22 testes), `rev5_common/fake_tmux.py` (10 campos e modificador `s|`),
+`rev5_common/mod.rs` (`Painel::cwd`, `agente_cwd`), `rev5_harness.rs` (+2 testes: sanitizacao e 10 campos; total 15),
+`rev5_source.rs` (R3 agora espera 10 campos). Nada em `src/`.
+
+**Falso e formato:** `list-panes` tem 10 campos, TAB literal, nesta ordem: `pane_id`, `pane_pid`, `pane_dead`,
+`pane_dead_status`, `window_activity`, `pane_current_command`, `session_id`, `@agentd`,
+`#{s|[^a-zA-Z0-9._/-]|_|:pane_current_path}` e `pane_title` por ultimo (spec 16). O falso expande o modificador `s|`
+com `re.sub` (o que o tmux faz) numa passada so. O cenario guarda o caminho cru de cada painel (`Painel::cwd`, padrao
+`/work/proj`) e a marca `@agentd` (NOME, `off` ou vazio). Config: `discover` e `discover_forget_s` nao entram na base
+(o padrao da spec e `false`/3600, e so os testes de descoberta os ligam), para que as suites antigas nao falhem por
+config. Fonte nova: `agente_cwd(c, id, kind, cwd)` gera `{type: tmux, cwd}`.
+
+**Cobertura (22 testes):**
+
+| R | Testes |
+|---|---|
+| R21 descoberta | `r21_descoberta_ligada_acha_claude_codex_e_pi_com_origin_discovered` (ids `claude-horus-reality-check`, `codex-blocks`, `pi-pi-proj`; estado pelas regras); `r21_descoberta_desligada_nao_mostra_nem_captura_painel_sem_marca` (controle: o objeto `discover` existe); `r21_shell_vim_desconhecido_e_morto_nunca_viram_agente` |
+| R22 nome estavel | `r22_id_fixo_mesmo_com_diretorio_mudando_no_cenario`; `r22_dois_ou_tres_paineis_no_mesmo_diretorio_sufixo_pela_ordem_numerica_do_pane_id` (`%9` antes de `%10`; `-2` e `-3`; conferido pelo estado de cada tela); `r22_o_segundo_nao_rouba_o_id_quando_o_primeiro_some_e_reaparece`; `r22_troca_de_pane_pid_no_mesmo_pane_id_recalcula_o_id` |
+| R23 precedencia | `r23_configurado_por_cwd_vence_e_nunca_e_descoberto_de_novo`; `r23_marca_sem_entrada_vira_agente_com_origin_mark`; `r23_marca_off_exclui_o_painel_da_descoberta` (nao captura); `r23_descoberto_que_colide_com_configurado_leva_sufixo_mesmo_com_pane_menor` |
+| R24 ciclo de vida | `r24_painel_que_some_vai_a_gone_e_e_esquecido_depois_de_discover_forget_s` (60 s, o minimo valido; ~90 s de teste); `r24_teto_de_32_conta_excedentes_em_ignored` (33 candidatos: 32 listados, `ignored` = 1) |
+| R25 captura minima | `r25_so_captura_configurado_marcado_ou_descoberto_vivo` (configurado, descoberto, marcado sem entrada; nao captura shell, `vim`, morto nem `off`); `r25_clientes_de_eventos_nascem_para_sessao_descoberta_e_no_maximo_8` |
+| R26 caminho hostil | `r26_caminhos_hostis_geram_ids_validos_sem_executar_nem_vazar` (TAB, aspas, `$()`, unicode, 300 caracteres, raiz; sentinela so no componente pai, varrida em lista, status, eventos, CLI e stderr); `r26_ids_derivados_sao_os_da_spec` (`/w/Blocks`->`codex-blocks`; `/w/a---b`->`codex-a-b`; `/w/_abc_`->`codex-abc`; `/`->`codex`; 40 `a` -> 32 caracteres com `codex-`; `/w/x y`->`codex-x_y`); `r26_pane_current_path_vazio_e_source_bad_output` |
+| R27 contrato | `r27_origin_em_get_list_eventos_e_cli` (`agent.get`, `agent.list`, eventos, `get --json`, `list --json`, linha da CLI com `discovered`); `r27_status_discover_tem_on_found_e_ignored`; `r27_validacoes_de_descoberta_recusam_saida_1` (forget 59 e 86401, cwd relativo, com espaco, com `..`, `discover` nao booleano, `agents` vazio com `discover` false; controle positivo); `r27_agents_vazio_so_e_aceito_com_discover_true` |
+
+**Recusa de configuracao (R27):** cada mutante tem controle positivo (a config valida de `discover: true` sem agentes
+sobe) antes da recusa, para que um binario que recusa tudo nao passe por acidente.
+
+**Ambiguidades (a secao 16 nao fixa; nao inventei): os testes so afirmam o que a spec garante**
+
+1. **`status.sources.tmux.discover.found`:** conta os descobertos publicados, ou os candidatos (incluindo os ignorados)?
+   O teste so afirma `found == 1` com um unico candidato (caso em que as duas leituras coincidem) e `ignored` no teto.
+2. **Quais candidatos ficam de fora acima de 32:** a spec so diz que os excedentes nao entram e sao contados. O teste
+   afirma a contagem (32 listados, `ignored` = 1), nao a identidade do excluido.
+3. **"Some da lista de ativos" (R24):** a spec nao define "ativos" nem diz se um `gone` continua em `agent.list` antes do
+   esquecimento. O teste afirma so `gone` (depois de `gone_after_s`), a presenca antes de `discover_forget_s` e
+   `unknown_agent` depois.
+4. **Painel que reaparece com o mesmo `pane_id`/`pid` (R22):** o teste afirma que volta a ser `codex-blocks` e que nao
+   surge um terceiro id. Isso e uma leitura de "guardado junto de (pane_id, pane_pid)" e de R22, nao uma frase explicita.
+5. **Formato da origem na linha da CLI (R27):** a spec diz que a origem aparece "na linha da CLI", sem dizer onde. O
+   teste so afirma que a palavra `discovered` aparece na linha.
+6. **`..` em `cwd`:** a secao 16 diz que o caminho vai "sem `..`", mas R27 so lista "nao absoluto ou com caractere fora
+   de `[A-Za-z0-9._/-]`". O teste recusa `/w/../x` por causa da secao 16 (a unica fonte da regra).
+7. **`agents` vazio com `discover` false:** a secao 16 diz que `agents` "passa a poder ser vazio quando `discover` e
+   `true`", o que implica recusa com `false`. O teste afirma a recusa; e uma inferencia da frase.
+8. **Valor invalido de `@agentd` (ex.: maiusculas, espaco):** a spec nao diz se a marca e validada, descartada ou usada
+   como nome. Nao testado.
+9. **Truncamento com sufixo de colisao:** quando o base chega a 32 e a colisao pede `-2`, nao esta dito se o base e
+   cortado para caber o sufixo. Nao testado (so o truncamento sem colisao, `r26_ids_derivados...`).
+10. **Caracteres multibyte no `s|`:** a spec diz so que "unicode vira `_`" (medido). Se e um `_` por caractere ou por byte
+    nao esta dito. Os testes de unicode afirmam so a validade do id, nao o numero de `_`.
+11. **Esquecimento com exatidao:** a spec diz "depois de `discover_forget_s` em `gone`", sem a precisao do limite. O
+    teste de 60 s afirma so que nao esquece antes de 20 s e que esquece ate 75 s depois da observacao de `gone`.
+12. **Clientes de eventos misturando configurado e descoberto:** a spec diz que o limite de 8 e "inalterado". O teste
+    cobre so o caso com 8 descobertos.
+
+**Lacunas:** o teste de esquecimento leva ~90 s (o minimo valido de `discover_forget_s` e 60 s). Nao ha teste de
+`cwd` de tamanho limite (200+ caracteres) alem do caminho de 300 caracteres de R26.
+
+**Resultado contra a implementacao atual (rev5.2, sem descoberta):**
+- `rev5_discovery`: 0/22. Motivos: 18 testes falham so por `campo desconhecido na config` (a rev5.2 recusa
+  `discover` e `discover_forget_s`); 2 (`r27_validacoes...` e `r27_agents_vazio...`) falham no controle positivo
+  (a config valida de `discover: true` e recusada); 1 (`r27_status...`) porque o objeto `status.sources.tmux.discover`
+  nao existe (`null`); 1 (`r21_descoberta_desligada...`) pelo mesmo objeto ausente, no controle positivo. Nenhum motivo
+  vem de bug do harness.
+- `rev5_rules` 20/20, `rev5_events` 14/14, `rev5_config_cli` 14/14, `rev5_source` 17/18.
+- `rev5_source::r03_lista_fechada...`: **falha por causa do 10o campo**. O falso agora manda o `-F` com 10 campos, e a
+  checagem de R3 espera os 10 (com `pane_current_path` sanitizado antes de `pane_title`). A rev5.2 manda o proprio `-F`
+  com 9 campos, e a asserção falha exatamente nisso ("o -F deve ser os dez campos", com a string enviada pelo daemon).
+  Nenhum outro teste antigo falha por causa do falso de 10 campos: a rev5.2 absorve o campo extra sem erro, e os testes
+  de regras, eventos e config continuam passando (o titulo ainda casa nas regras de Codex, que sao as sensiveis a ele).
+- `harness_`: 15/15.
+
+**Verificacao final (rodada 4):**
+- `cargo test --offline -p agentd --no-run`: compila, 0 avisos.
+- `cargo test --offline -p agentd -- harness_`: 15/15.
+- `cargo clippy --offline -p agentd --test rev5_harness --test rev5_rules --test rev5_source --test rev5_events --test rev5_config_cli --test rev5_discovery -- -D warnings`: sai 0.
+- `cargo fmt -p agentd -- --check`: limpo.
+- `git status --short`: so `tests/rev5_*` e `tests/REV5-TESTES.md` (e os arquivos de `rev5_common/`).
+- **Ressalva de escopo:** nesta rodada eu rodei `cargo fmt -p agentd` (a formatacao do workspace inteiro) para manter os
+  arquivos limpos. No inicio da rodada `cargo fmt -p agentd -- --check` apontava diferencas em `src/daemon.rs` e
+  `src/main.rs`; no fim nao havia nenhuma e `git status` de `src/` esta limpo. Nao consigo provar se o meu `fmt` mudou
+  `src/` antes de o implementador commitar. Quem commita deve conferir o diff de `src/` no commit do implementador.
+  Daqui em diante usei so a checagem, sem reescrever `src/`.
 - Nenhum `git add`, `stash`, `reset`, `checkout` ou commit foi feito por mim.

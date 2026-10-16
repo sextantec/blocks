@@ -26,7 +26,9 @@ ARGV = sys.argv[2:]
 CEN = os.path.join(DIR, "cenario.json")
 LOG = os.path.join(DIR, "chamadas.jsonl")
 TRAVA = os.path.join(DIR, "trava.lock")
-TOK = re.compile(r"#\{([^}]*)\}")
+# Formato: #{var} e o modificador de sanitizacao #{s|RE|SUB|:var} (spec rev5.3 secao 16: o proprio tmux
+# troca por _ o que estiver fora de [A-Za-z0-9._/-]). Uma passada so: o valor expandido nao e reexpandido.
+TOK = re.compile(r"#\{s\|([^|]*)\|([^|]*)\|:([A-Za-z_]+)\}|#\{([^}]*)\}")
 ALVO_PANE = re.compile(r"%[0-9]+\Z")
 ALVO_SESSAO = re.compile(r"\$[0-9]+\Z")
 
@@ -60,7 +62,12 @@ def sentinela(c):
 
 def expande(fmt, painel):
     # Variavel desconhecida vira campo vazio (comportamento do tmux com -F).
-    return TOK.sub(lambda m: str(painel.get(m.group(1), "")), fmt)
+    def troca(m):
+        if m.group(3) is not None:
+            return re.sub(m.group(1), m.group(2), str(painel.get(m.group(3), "")))
+        return str(painel.get(m.group(4), ""))
+
+    return TOK.sub(troca, fmt)
 
 
 def list_panes(c, fmt):

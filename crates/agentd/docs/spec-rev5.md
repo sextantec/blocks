@@ -289,3 +289,18 @@ O escritor dos testes (Haiku 5.5, sem ver o codigo) levantou 10 ambiguidades; es
 - **Seguranca e privacidade:** com `discover: true` o `agentd` captura a tela de **qualquer** painel do servidor tmux que rode `claude`, `codex` ou `pi`, sem marca previa; o conteudo continua sem sair do daemon (principio 3). Para excluir um painel, `tmux set-option -p -t PAINEL @agentd off` (`off` e nome reservado). O id derivado revela o nome do diretorio de trabalho no `agent.list`/`status`/CLI: e a unica derivacao de dado do ambiente que sai do daemon, e so no formato do id.
 - **Eventos (4A) e R3:** clientes de controle tambem nascem para sessoes com painel descoberto (limite de 8 inalterado); a lista fechada de comandos (secao 4) nao muda.
 - **Fora desta secao:** marcar painel pelo proprio `agentd` (ele continua so lendo), descobrir outros programas alem dos `kind` do arquivo de regras, e escolher nome por titulo da janela.
+
+## 17. Esclarecimentos dos testes da rev5.3 (2026-10-16 tarde)
+Aditivo; em empate vale este texto.
+1. **`discover.found`** = agentes descobertos **publicados** (com `origin: "discovered"`); **`ignored`** = candidatos que ficaram de fora pelo teto de 32. `found + ignored` = candidatos.
+2. **Acima de 32:** entram primeiro os `configured`, depois os `mark`, depois os descobertos por `pane_id` numerico crescente; ficam de fora os de maior `pane_id`.
+3. **`gone` continua em `agent.list`** (e em `agent.get`) ate ser esquecido; esquecer so ocorre `discover_forget_s` depois de o estado `gone` ter sido **publicado**, no primeiro ciclo posterior (atraso de ate um ciclo).
+4. **Painel que some e volta** com o mesmo `(pane_id, pane_pid)` antes de ser esquecido **mantem** o id; depois de esquecido e tratado como novo (id recalculado).
+5. **Linha da CLI** (sem `--json`): acrescenta ao fim ` origin=VALOR` (`configured|mark|discovered`): `ID ESTADO[,MARCAS] EVIDENCIA FONTE idade=Ns origin=VALOR`.
+6. **`cwd`** com qualquer componente `..` (ou `.`) e recusado, alem de nao absoluto e de caractere fora de `[A-Za-z0-9._/-]`.
+7. **`agents` vazio com `discover: false`** e recusado (saida 1).
+8. **`@agentd` com valor fora de `[a-z0-9_-]{1,32}`** (maiuscula, espaco, vazio) e tratado como **sem marca**: o painel segue candidato a descoberta pelo diretorio; `off` e reservado e exclui; `off` nao pode ser id de entrada em `agents` (recusa).
+9. **Truncamento e sufixo:** o id inteiro, **com** o sufixo de colisao, tem no maximo 32 caracteres; o `base` e cortado para o sufixo caber (o prefixo `<kind>-` fica).
+10. **Caractere multibyte no caminho:** o numero de `_` que o tmux produz nao e contrato; so o id final (`[a-z0-9_-]{1,32}`) e.
+11. **Clientes de eventos (4A) com tipos misturados:** nascem para toda sessao que tem painel `configured`, `mark` ou `discovered` vivo, no maximo 8 no total, sessoes por numero crescente.
+12. **Lacuna aceita:** a identidade do candidato excluido por `off` ou pelo teto nao e exposta; so a contagem.

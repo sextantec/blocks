@@ -74,6 +74,8 @@ pub struct Painel {
     pub tag: Option<String>,
     pub titulo: String,
     pub ativ: u64,
+    /// `pane_current_path` cru (o falso sanitiza com o modificador s| do formato, como o tmux).
+    pub cwd: String,
 }
 
 impl Painel {
@@ -88,6 +90,7 @@ impl Painel {
             tag: None,
             titulo: String::new(),
             ativ: 1_700_000_000,
+            cwd: "/work/proj".to_string(),
         }
     }
     pub fn tag(mut self, t: &str) -> Painel {
@@ -110,6 +113,10 @@ impl Painel {
         self.morto = m;
         self
     }
+    pub fn cwd(mut self, c: &str) -> Painel {
+        self.cwd = c.to_string();
+        self
+    }
     pub fn ativ(mut self, a: u64) -> Painel {
         self.ativ = a;
         self
@@ -124,6 +131,7 @@ impl Painel {
             "pane_current_command": self.cmd,
             "session_id": self.sessao,
             "@agentd": self.tag.clone().unwrap_or_default(),
+            "pane_current_path": self.cwd,
             "pane_title": self.titulo,
         })
     }
@@ -396,6 +404,11 @@ pub fn agentes_todos() -> Vec<(&'static str, &'static str, &'static str)> {
         ("codex-blocks", "codex", "codex-blocks"),
         ("pi", "pi", "pi"),
     ]
+}
+
+/// Troca a entrada `id` de `c["agents"]` pela fonte `{type: tmux, cwd}` (spec rev5.3 secao 16).
+pub fn agente_cwd(c: &mut Value, id: &str, kind: &str, cwd: &str) {
+    c["agents"][id] = json!({"kind": kind, "sources": [{"type": "tmux", "cwd": cwd}]});
 }
 
 pub fn escreve_cfg(dir: &Path, c: &Value) -> PathBuf {

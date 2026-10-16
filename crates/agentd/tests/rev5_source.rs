@@ -313,7 +313,7 @@ fn r03_lista_fechada_por_dez_ciclos_so_list_panes_e_capture_de_presentes() {
         n_cap1 <= n_list,
         "R3: mais de uma captura por ciclo para %1 ({n_cap1} capturas, {n_list} listagens)"
     );
-    // Spec 15.6 (e secao 4): o -F tem TAB literal (0x09) entre nove campos, nesta ordem.
+    // Spec 15.6 (e secao 4): o -F tem TAB literal (0x09) entre dez campos (rev5.3: pane_current_path antes de pane_title), nesta ordem.
     let formatos: Vec<String> = m
         .chamadas()
         .iter()
@@ -321,6 +321,8 @@ fn r03_lista_fechada_por_dez_ciclos_so_list_panes_e_capture_de_presentes() {
         .filter_map(|a| a.last().cloned())
         .collect();
     assert!(!formatos.is_empty(), "R3: nenhum list-panes registrado");
+    // Spec rev5.3 secao 16: sao 10 campos; pane_current_path (ja sanitizado pelo modificador s|) vem
+    // antes de pane_title, que continua por ultimo.
     let esperado = [
         "#{pane_id}",
         "#{pane_pid}",
@@ -330,13 +332,14 @@ fn r03_lista_fechada_por_dez_ciclos_so_list_panes_e_capture_de_presentes() {
         "#{pane_current_command}",
         "#{session_id}",
         "#{@agentd}",
+        "#{s|[^a-zA-Z0-9._/-]|_|:pane_current_path}",
         "#{pane_title}",
     ];
     for f in &formatos {
         let campos: Vec<&str> = f.split('\t').collect();
         assert_eq!(
             campos, esperado,
-            "R3 (spec 15.6): o -F deve ser os nove campos separados por TAB: {f:?}"
+            "R3 (spec 15.6): o -F deve ser os dez campos separados por TAB: {f:?}"
         );
     }
     assert!(srv.socket.exists());

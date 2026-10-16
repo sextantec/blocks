@@ -303,3 +303,52 @@ fn harness_config_gerada_respeita_os_limites_da_secao_7() {
         }
     }
 }
+
+#[test]
+fn harness_list_panes_sanitiza_pane_current_path_como_o_tmux() {
+    // Spec rev5.3 secao 16: #{s|[^a-zA-Z0-9._/-]|_|:pane_current_path} troca cada caractere fora da classe
+    // por _ (TAB, espaco, aspas, $(), unicode). Sem isso um TAB no diretorio quebraria os campos.
+    let mut m = Mundo::novo();
+    m.paineis(&[Painel::new("%1", "codex").cwd("/w/a b\tc\"$(x)\u{e7}/d.e-f_g")]);
+    let (rc, out, _) = roda_tmux(
+        &m,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{s|[^a-zA-Z0-9._/-]|_|:pane_current_path}\t#{pane_title}",
+        ],
+    );
+    assert_eq!(rc, Some(0));
+    let campos: Vec<&str> = out.trim_end_matches('\n').split('\t').collect();
+    assert_eq!(
+        campos.len(),
+        3,
+        "o TAB do caminho nao pode quebrar os campos: {out:?}"
+    );
+    assert_eq!(campos[1], "/w/a_b_c___x__/d.e-f_g");
+}
+
+#[test]
+fn harness_list_panes_com_10_campos_pane_current_path_antes_do_titulo() {
+    // Spec rev5.3 secao 16: o -F tem 10 campos; o caminho (sanitizado) vem antes de pane_title.
+    let mut m = Mundo::novo();
+    m.paineis(&[Painel::new("%1", "codex")
+        .tag("codex-blocks")
+        .cwd("/w/blocks")
+        .titulo("T")]);
+    let (rc, out, _) = roda_tmux(
+        &m,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_dead_status}\t#{window_activity}\t#{pane_current_command}\t#{session_id}\t#{@agentd}\t#{s|[^a-zA-Z0-9._/-]|_|:pane_current_path}\t#{pane_title}",
+        ],
+    );
+    assert_eq!(rc, Some(0));
+    assert_eq!(
+        out,
+        "%1\t4242\t0\t\t1700000000\tcodex\t$1\tcodex-blocks\t/w/blocks\tT\n"
+    );
+}
