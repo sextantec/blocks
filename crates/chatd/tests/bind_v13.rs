@@ -93,19 +93,27 @@ impl Mux {
 
 /// Config v1.3: auth obrigatoria; codex com `delivery` dado; claude so watch; binarios falsos.
 fn cfg_v13(dir: &Path, mux: &Mux, codex: Value) -> PathBuf {
-    escreve_config(
-        dir,
-        &json!({
-            "herdr_bin": s(&mux.herdr),
-            "tmux_bin": s(&mux.tmux),
-            "bell_poll_ms": 50,
-            "bell_rearm_s": 600,
-            "recipients": {
-                CODEX: codex,
-                CLAUDE: {"delivery": "watch"}
-            }
-        }),
-    )
+    cfg_v13_com(dir, mux, codex, json!({}))
+}
+
+/// Como `cfg_v13`, mais as chaves de `extra` (v1.10: `bell_tmux_typing`).
+fn cfg_v13_com(dir: &Path, mux: &Mux, codex: Value, extra: Value) -> PathBuf {
+    let mut c = json!({
+        "herdr_bin": s(&mux.herdr),
+        "tmux_bin": s(&mux.tmux),
+        "bell_poll_ms": 50,
+        "bell_rearm_s": 600,
+        "recipients": {
+            CODEX: codex,
+            CLAUDE: {"delivery": "watch"}
+        }
+    });
+    if let (Some(base), Value::Object(ex)) = (c.as_object_mut(), extra) {
+        for (k, v) in ex {
+            base.insert(k, v);
+        }
+    }
+    escreve_config(dir, &c)
 }
 
 struct Amb {
@@ -118,9 +126,18 @@ struct Amb {
 }
 
 fn amb(codex: Value) -> Amb {
+    amb_com(codex, json!({}))
+}
+
+/// Como `amb`, com `bell_tmux_typing: true` (v1.10: padrao false). So para testes que digitam pelo tmux falso.
+fn amb_digita(codex: Value) -> Amb {
+    amb_com(codex, json!({"bell_tmux_typing": true}))
+}
+
+fn amb_com(codex: Value, extra: Value) -> Amb {
     let d = tmp();
     let mux = Mux::novo(d.path());
-    let cfg = cfg_v13(d.path(), &mux, codex);
+    let cfg = cfg_v13_com(d.path(), &mux, codex, extra);
     let srv = sobe(&d.path().join("state"), &cfg);
     let tok_codex = token_new(&srv.state, CODEX, &d.path().join("codex.tok"));
     let tok_claude = token_new(&srv.state, CLAUDE, &d.path().join("claude.tok"));
@@ -344,7 +361,7 @@ fn b2_cli_bind_com_painel_alheio_sai_3() {
 
 #[test]
 fn c1_ligacao_valida_habilita_campainha_no_painel_verificado() {
-    let a = amb(json!({"delivery": "auto"}));
+    let a = amb_digita(json!({"delivery": "auto"}));
     liga_no_proprio_ancestral(&a, "%1");
     a.manda_para_codex("c1-1");
     assert!(
@@ -379,7 +396,7 @@ fn c2_sem_ligacao_delivery_auto_gera_bell_failed_unbound_e_nao_digita() {
 #[test]
 fn c3_campainha_digita_so_no_painel_ligado_nunca_no_id_do_arquivo() {
     // delivery auto nao tem pane: qualquer digitacao precisa vir da ligacao verificada
-    let a = amb(json!({"delivery": "auto"}));
+    let a = amb_digita(json!({"delivery": "auto"}));
     liga_no_proprio_ancestral(&a, "%1");
     a.manda_para_codex("c3-1");
     assert!(a.digitou("%1", Duration::from_secs(5)));
@@ -396,7 +413,7 @@ fn c3_campainha_digita_so_no_painel_ligado_nunca_no_id_do_arquivo() {
 #[test]
 #[ignore = "AMBIGUO: espera o TTL de 120 s (roda com --ignored)"]
 fn d1_ttl_expira_em_120s_e_a_campainha_para() {
-    let a = amb(json!({"delivery": "auto"}));
+    let a = amb_digita(json!({"delivery": "auto"}));
     liga_no_proprio_ancestral(&a, "%1");
     thread::sleep(Duration::from_secs(125));
     assert!(
@@ -415,7 +432,7 @@ fn d1_ttl_expira_em_120s_e_a_campainha_para() {
 #[test]
 #[ignore = "AMBIGUO: exige passar do TTL de 120 s com watch ativo (roda com --ignored)"]
 fn d2_watch_ativo_renova_a_ligacao() {
-    let a = amb(json!({"delivery": "auto"}));
+    let a = amb_digita(json!({"delivery": "auto"}));
     liga_no_proprio_ancestral(&a, "%1");
     let tok = s(&a.tokfile_codex).to_string();
     let sock = s(&a.sock()).to_string();
@@ -479,7 +496,7 @@ fn e1_bell_com_pane_fixo_funciona_sem_bind() {
 
 #[test]
 fn e2_com_bind_ativo_a_ligacao_prevalece_sobre_o_pane_do_arquivo() {
-    let a = amb(json!({"delivery": "bell", "pane": "w2:p1"}));
+    let a = amb_digita(json!({"delivery": "bell", "pane": "w2:p1"}));
     liga_no_proprio_ancestral(&a, "%1");
     a.manda_para_codex("e2-1");
     assert!(
@@ -539,7 +556,7 @@ fn f1_bound_e_unbound_sem_segredos_e_fora_do_watch() {
 
 #[test]
 fn f2_uma_ligacao_por_nome_substitui_a_anterior() {
-    let a = amb(json!({"delivery": "auto"}));
+    let a = amb_digita(json!({"delivery": "auto"}));
     liga_no_proprio_ancestral(&a, "%1");
     a.mux.painel_pid("%2", getppid());
     let r = a.bind("tmux", "%2");
@@ -659,6 +676,7 @@ fn t1_tmux_real_bind_pelo_painel_e_campainha_digita_no_painel() {
         &json!({
             "herdr_bin": s(&mux.herdr),
             "tmux_bin": s(&wrapper),
+            "bell_tmux_typing": true,
             "bell_poll_ms": 50,
             "bell_rearm_s": 600,
             "recipients": {CODEX: {"delivery": "auto"}, CLAUDE: {"delivery": "watch"}}
