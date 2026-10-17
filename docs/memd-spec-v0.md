@@ -50,7 +50,7 @@ Todas exigem `request_id` (secao 6). Ponto de linearizacao: a validacao, a aloca
 - **Escrita** exige a `op` e `write_scopes` casando; `promote` exige tambem escopo de **escrita** no registro e em **todas** as pontas de `supersedes`.
 - **Inacessivel e inexistente respondem `not_found`**, tambem em mutacao cega. `status` devolve `head_seq` e contagens globais por `status` (sem escopos); documentado como revelando so o volume.
 - **Token:** `mt_` + 43 caracteres base64url (256 bits de `/dev/urandom`); o daemon guarda so o SHA-256 em hexadecimal; o cliente le o token de um arquivo (`--token-file` ou `MEMD_TOKEN_FILE`), nunca por argumento; o token vai em cada requisicao (`"token"`), para que a revogacao (remover do `grants.json` + `SIGHUP`) valha na hora, inclusive em conexao aberta. Token nunca em log de diagnostico, mensagem de erro, `status` ou `whoami`.
-- **Cotas:** `max_open_proposals` por agente (padrao 20), `max_records` global (20000), `max_connections` (32), requisicao <= `line_max`. Estourar = `quota`/`overloaded`.
+- **Cotas:** `max_open_proposals` por agente (padrao 20), `max_records` global (20000), `max_connections` (32), requisicao <= `line_max` (linha maior = `invalid_params`, secao 8A). Estourar as cotas = `quota`/`overloaded`. **`types` do perfil restringe leitura E escrita** (propor ou promover um tipo fora de `types` = `forbidden`).
 - **Limite honesto:** agentes do mesmo usuario Unix que leem o arquivo de token de outro se passam por ele, e qualquer processo do mesmo usuario pode editar `log.jsonl`. O token separa papeis; nao isola agentes hostis. A v1 (assinatura do dono, `ssh-keygen -Y`) e as contas Unix por agente fecham o resto.
 
 ## 6. Protocolo
