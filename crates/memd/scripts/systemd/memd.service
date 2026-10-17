@@ -1,0 +1,17 @@
+# Unit de usuario; instalar com scripts/systemd/instala-unit.sh (depois de scripts/prepara.sh).
+[Unit]
+Description=memd: memoria compartilhada curada do time de agentes
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/memd serve --state-dir %h/.local/state/memd --config %h/.local/state/memd/config.json --grants %h/.local/state/memd/grants.json
+# SIGHUP recarrega grants.json (token revogado ou expirado vale na hora).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

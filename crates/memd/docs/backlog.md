@@ -11,3 +11,6 @@
 5. 2026-10-16 — codex-blocks — Durante a edição dos testes pelo Haiku, `acesso.rs` deixou de compilar por nomes de helpers temporariamente desalinhados. O Sextante confirmou que a suite ainda estava em edição e instruiu não registrar falhas transitórias de compilação. ENCERRADO 2026-10-16 (transiente, suite independente em edição).
 
 6. 2026-10-16 — codex-blocks — Auditoria final: em `crates/memd/src/service.rs:236,691-696,797-816,1168-1174`, validação de `review_by` usa a data efetiva antes de `Log::commit`, mas a projeção é reaplicada depois com relógio atualizado. Se UTC virar à meia-noite entre esses pontos, uma proposta pode ser gravada e depois rejeitada pela projeção; o serviço fica `broken` com evento durável. Corrigir alinhando a data usada na validação e no timestamp efetivo do commit; exige obter do `blocklog` o timestamp realmente gravado, fora dos arquivos autorizados desta tarefa.
+
+7. 2026-10-16 — Sextante — `memd init DIR` usa `create_dir` e falha se o diretorio-pai nao existe (o `prepara.sh` contorna com `install -d`). Baixa.
+8. 2026-10-16 — Sextante — O cliente `memd` nao tem socket padrao (`memd.sock` relativo ao cwd); os wrappers do `prepara.sh` passam `--socket`. Proposta: padrao `$XDG_STATE_HOME/memd/memd.sock`. Contrato publico: pede ok.
