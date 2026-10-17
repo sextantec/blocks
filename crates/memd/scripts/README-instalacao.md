@@ -12,10 +12,23 @@ bash crates/memd/scripts/systemd/instala-unit.sh              # copia a unit e r
 systemctl --user enable --now memd.service
 ```
 
-`prepara.sh` e idempotente: nao recria token existente nem sobrescreve `grants.json` editado (`--regrava-grants` refaz, com backup). `--dry-run` mostra o plano. Cria:
+`prepara.sh` e idempotente (nao recria o que existe) e `--dry-run` mostra o plano. Cria:
 - `~/.local/state/memd/` (0700): `config.json`, `grants.json`, `log.jsonl`, `memd.sock`, `GUIA-AGENTES.md`, `tokens/<agente>.token` (0600).
 - Dois perfis: `claude` (propoe e promove) e `codex-blocks` (so propoe); leem e escrevem em qualquer escopo (`*`). Expiram em 90 dias (`--expira AAAA-MM-DD`). Edite `grants.json` para estreitar escopos e depois `systemctl --user reload memd.service` (SIGHUP) para valer sem reiniciar.
 - Wrappers `~/.local/bin/memd-claude` e `~/.local/bin/memd-codex-blocks` (so levam o caminho do token, nao o segredo).
+
+## 1b. Qualquer agente (codex, pi, hermes...)
+O memd e geral: cada agente e um perfil em `grants.json` com token proprio e um wrapper `memd-<nome>`. `agente.sh` cuida disso e recarrega o servico (SIGHUP), sem reiniciar:
+
+```sh
+bash crates/memd/scripts/agente.sh add codex                         # le e propoe em qualquer escopo
+bash crates/memd/scripts/agente.sh add pi --ops propose --read 'pi/**,blocks/**' --write 'pi/**'
+bash crates/memd/scripts/agente.sh add hermes --ops propose,promote  # outro curador
+bash crates/memd/scripts/agente.sh list
+bash crates/memd/scripts/agente.sh rotate codex                      # token novo; o antigo deixa de valer
+bash crates/memd/scripts/agente.sh remove pi                         # apaga perfil, token e wrapper
+```
+Escopos: `*` = tudo, `a/b` = exato, `a/**` = `a` e tudo abaixo. `--types decision,pending` restringe os tipos. Cada edicao deixa um `grants.json.bak.<data>`. Agente sem shell (cliente MCP, outro daemon) fala direto o protocolo JSON por linha no `memd.sock`, com o token no pedido.
 
 ## 2. Primeiro teste
 ```sh
